@@ -327,12 +327,42 @@ class MultiClassTsetlinMachine():
 	
 		Y = np.ascontiguousarray(np.zeros(number_of_examples, dtype=np.uint32))
 		if return_class_sums:
-			class_sums = np.ascontiguousarray(np.zeros((number_of_examples, self.number_of_classes), dtype=np.int32))
-			_lib.mc_tm_predict_with_class_sums_2d(self.mc_tm, self.encoded_X, Y, class_sums, number_of_examples)
+			class_sums = np.ascontiguousarray(np.zeros(number_of_examples, dtype=np.int32))
+			_lib.mc_tm_predict_with_class_sums(self.mc_tm, self.encoded_X, Y, class_sums, number_of_examples)
 			return Y, class_sums
 		
 		_lib.mc_tm_predict(self.mc_tm, self.encoded_X, Y, number_of_examples)
 		return Y
+
+	
+	def predict_class_sums_2d(self, X):
+		"""
+		Use to get the 2d class sums for each example in X
+		Ex:
+		>>> Y, class_sums = tm.predict_class_sums_2d(X)
+		>>> print(class_sums)
+		[[ 0  0  0  0  0  0  0  0  0  0]
+		 [ 0  0  0  0  0  0  0  0  0  0]
+		 [ 0  0  0  0  0  0  0  0  0  0]
+		 ....
+		]
+		"""
+		number_of_examples = X.shape[0]
+		
+		self.encoded_X = np.ascontiguousarray(np.empty(int(number_of_examples * self.number_of_patches * self.number_of_ta_chunks), dtype=np.uint32))
+
+		Xm = np.ascontiguousarray(X.flatten()).astype(np.uint32)
+
+		if self.append_negated:
+			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features//2, 1, 1, self.number_of_features//2, 1, 1)
+		else:
+			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
+	
+		Y = np.ascontiguousarray(np.zeros(number_of_examples, dtype=np.uint32))
+		class_sums = np.ascontiguousarray(np.zeros((number_of_examples, self.number_of_classes), dtype=np.int32))
+		_lib.mc_tm_predict_with_class_sums_2d(self.mc_tm, self.encoded_X, Y, class_sums, number_of_examples)
+		return Y, class_sums
+	
 
 	
 	def ta_state(self, mc_tm_class, clause, ta):

@@ -204,7 +204,6 @@ void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, un
 {
 
 	unsigned int step_size = mc_tm->number_of_patches * mc_tm->number_of_ta_chunks;
-
 	int max_threads = omp_get_max_threads();
 	struct MultiClassTsetlinMachine **mc_tm_thread = (void *)malloc(sizeof(struct MultiClassTsetlinMachine *) * max_threads);
 	struct TsetlinMachine *tm = mc_tm->tsetlin_machines[0];
@@ -226,16 +225,17 @@ void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, un
 		// Identify class with largest output
 		int max_class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[0], &X[pos]);
 		int max_class = 0;
-		for (int i = 1; i < mc_tm_thread[thread_id]->number_of_classes; i++) {	
+		for (int i = 0; i < mc_tm_thread[thread_id]->number_of_classes; i++) {	
 			int class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos]);
 			if (max_class_sum < class_sum) {
 				max_class_sum = class_sum;
 				max_class = i;
 			}
+			// class_sums is a 2D array with dimensions [number_of_examples][number_of_classes]
+			class_sums[l*mc_tm_thread[thread_id]->number_of_classes + i] = class_sum;
 		}
 
 		y[l] = max_class;
-		class_sums[l] = max_class_sum;
 	}
 
 	for (int t = 0; t < max_threads; t++) {

@@ -23,6 +23,7 @@ Multi-threaded implementation of the Tsetlin Machine (https://arxiv.org/abs/1804
   - [Fashion MNIST 2D Convolution Demo w/Weighted Clauses](#fashion-mnist-2d-convolution-demo-wweighted-clauses)
   - [IMDb Text Categorization Demo](#imdb-text-categorization-demo)
   - [Regression Demo](#regression-demo)
+- [Contributing](#contributing)
 - [Further Work](#further-work)
 - [Requirements](#requirements)
 - [Acknowledgements](#acknowledgements)
@@ -686,6 +687,21 @@ RMSD over 25 runs:
 #24 RMSD: 0.61 +/- 0.00 (1.06s)
 #25 RMSD: 0.61 +/- 0.00 (1.02s)
 ```
+
+## Contributing
+
+There is a Docker container available for development purposes. To build the container, run the following command:
+
+```bash
+docker build -t pytsetlinmachineparallel .
+```
+
+To run the container, execute the following command:
+
+```bash
+docker run -it --rm  -v $(pwd):$(pwd) pytsetlinmachineparallel bash
+```
+
 
 ## Further Work
 

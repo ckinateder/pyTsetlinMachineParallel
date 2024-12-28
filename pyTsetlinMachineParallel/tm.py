@@ -66,6 +66,9 @@ _lib.mc_tm_initialize.argtypes = [mc_ctm_pointer]
 _lib.mc_tm_predict.restype = None                    
 _lib.mc_tm_predict.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, C.c_int] 
 
+_lib.mc_tm_predict_with_class_sums.restype = None                    
+_lib.mc_tm_predict_with_class_sums.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, array_1d_uint, C.c_int] 
+
 _lib.mc_tm_ta_state.restype = C.c_int                    
 _lib.mc_tm_ta_state.argtypes = [mc_ctm_pointer, C.c_int, C.c_int, C.c_int]
 
@@ -302,7 +305,7 @@ class MultiClassTsetlinMachine():
 
 		return
 
-	def predict(self, X):
+	def predict(self, X, return_class_sums=False):
 		number_of_examples = X.shape[0]
 		
 		self.encoded_X = np.ascontiguousarray(np.empty(int(number_of_examples * self.number_of_patches * self.number_of_ta_chunks), dtype=np.uint32))
@@ -315,10 +318,14 @@ class MultiClassTsetlinMachine():
 			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
 	
 		Y = np.ascontiguousarray(np.zeros(number_of_examples, dtype=np.uint32))
-
+		if return_class_sums:
+			class_sums = np.ascontiguousarray(np.zeros(number_of_examples, dtype=np.uint32))
+			_lib.mc_tm_predict_with_class_sums(self.mc_tm, self.encoded_X, Y, class_sums, number_of_examples)
+			return Y, class_sums
+		
 		_lib.mc_tm_predict(self.mc_tm, self.encoded_X, Y, number_of_examples)
-
 		return Y
+
 	
 	def ta_state(self, mc_tm_class, clause, ta):
 		return _lib.mc_tm_ta_state(self.mc_tm, mc_tm_class, clause, ta)

@@ -48,6 +48,11 @@ array_1d_int = np.ctypeslib.ndpointer(
 	ndim=1,
 	flags='CONTIGUOUS')
 
+array_2d_int = np.ctypeslib.ndpointer(
+	dtype=np.int32,
+	ndim=2,
+	flags='CONTIGUOUS')
+
 
 # Multiclass Tsetlin Machine
 
@@ -67,7 +72,7 @@ _lib.mc_tm_predict.restype = None
 _lib.mc_tm_predict.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, C.c_int] 
 
 _lib.mc_tm_predict_with_class_sums.restype = None                    
-_lib.mc_tm_predict_with_class_sums.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, array_1d_uint, C.c_int] 
+_lib.mc_tm_predict_with_class_sums.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, array_1d_int, C.c_int] 
 
 _lib.mc_tm_ta_state.restype = C.c_int                    
 _lib.mc_tm_ta_state.argtypes = [mc_ctm_pointer, C.c_int, C.c_int, C.c_int]
@@ -319,7 +324,7 @@ class MultiClassTsetlinMachine():
 	
 		Y = np.ascontiguousarray(np.zeros(number_of_examples, dtype=np.uint32))
 		if return_class_sums:
-			class_sums = np.ascontiguousarray(np.zeros(number_of_examples, dtype=np.uint32))
+			class_sums = np.ascontiguousarray(np.zeros(number_of_examples, dtype=np.int32))
 			_lib.mc_tm_predict_with_class_sums(self.mc_tm, self.encoded_X, Y, class_sums, number_of_examples)
 			return Y, class_sums
 		

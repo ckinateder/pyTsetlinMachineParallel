@@ -20,6 +20,7 @@ Multi-threaded implementation of the Tsetlin Machine (https://arxiv.org/abs/1804
   - [MNIST Demo](#mnist-demo)
   - [MNIST Demo w/Weighted Clauses](#mnist-demo-wweighted-clauses)
   - [MNIST 2D Convolution Demo w/Weighted Clauses](#mnist-2d-convolution-demo-wweighted-clauses)
+  - [MNIST Demo w/ Class Sums](#mnist-demo-w-class-sums)
   - [Fashion MNIST 2D Convolution Demo w/Weighted Clauses](#fashion-mnist-2d-convolution-demo-wweighted-clauses)
   - [IMDb Text Categorization Demo](#imdb-text-categorization-demo)
   - [Regression Demo](#regression-demo)
@@ -436,6 +437,58 @@ Accuracy over 30 epochs:
 #29 Accuracy: 99.09% (30.21s)
 #30 Accuracy: 99.12% (29.52s)
 ```
+
+### MNIST Demo w/ Class Sums
+
+#### Code: MNISTDemoClassSums.py
+
+```python
+from pyTsetlinMachineParallel.tm import MultiClassTsetlinMachine
+import numpy as np
+from time import time
+
+from keras.datasets import mnist
+
+(X_train, Y_train), (X_test, Y_test) = mnist.load_data()
+
+X_train = np.where(X_train.reshape((X_train.shape[0], 28*28)) > 75, 1, 0) 
+X_test = np.where(X_test.reshape((X_test.shape[0], 28*28)) > 75, 1, 0) 
+
+tm = MultiClassTsetlinMachine(2000, 50, 10.0)
+epochs = 50
+
+print(f"\nAccuracy over {epochs} epochs:\n")
+for i in range(epochs):
+    start_training = time()
+    tm.fit(X_train, Y_train, epochs=1, incremental=True)
+    stop_training = time()
+
+    start_testing = time()
+    prediction, class_sums = tm.predict(X_test, return_class_sums=True)
+    result = 100*(prediction == Y_test).mean()
+    stop_testing = time()
+    
+    print(f"Class sums: {class_sums}")
+
+    print("#%d Accuracy: %.2f%% Training: %.2fs Testing: %.2fs" % (i+1, result, stop_training-start_training, stop_testing-start_testing))
+```
+
+#### Output
+
+```bash
+python3 ./MNISTDemoClassSums.py
+
+Accuracy over 50 epochs:
+
+Class sums: [50 47 50 ... 50 50 50]
+#1 Accuracy: 94.60% Training: 5.27s Testing: 2.13s
+Class sums: [50 34 50 ... 50 50 50]
+#2 Accuracy: 95.41% Training: 4.38s Testing: 2.00s
+Class sums: [50 50 50 ... 50 50 50]
+#3 Accuracy: 96.00% Training: 4.16s Testing: 1.92s
+...
+```
+
 ### Fashion MNIST 2D Convolution Demo w/Weighted Clauses
 
 #### Code: FashionMNISTDemo2DConvolutionWeightedClauses.py

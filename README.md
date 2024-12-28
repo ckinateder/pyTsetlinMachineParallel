@@ -21,6 +21,7 @@ Multi-threaded implementation of the Tsetlin Machine (https://arxiv.org/abs/1804
   - [MNIST Demo w/Weighted Clauses](#mnist-demo-wweighted-clauses)
   - [MNIST 2D Convolution Demo w/Weighted Clauses](#mnist-2d-convolution-demo-wweighted-clauses)
   - [MNIST Demo w/ Class Sums](#mnist-demo-w-class-sums)
+  - [MNIST Demo w/ 2D Class Sums](#mnist-demo-w-2d-class-sums)
   - [Fashion MNIST 2D Convolution Demo w/Weighted Clauses](#fashion-mnist-2d-convolution-demo-wweighted-clauses)
   - [IMDb Text Categorization Demo](#imdb-text-categorization-demo)
   - [Regression Demo](#regression-demo)
@@ -440,6 +441,8 @@ Accuracy over 30 epochs:
 
 ### MNIST Demo w/ Class Sums
 
+The following code demonstrates how to retrieve the class sums for each class after each epoch. This returns a 1d array with the sum of all clauses for each class. 
+
 #### Code: MNISTDemoClassSums.py
 
 ```python
@@ -486,6 +489,87 @@ Class sums: [50 34 50 ... 50 50 50]
 #2 Accuracy: 95.41% Training: 4.38s Testing: 2.00s
 Class sums: [50 50 50 ... 50 50 50]
 #3 Accuracy: 96.00% Training: 4.16s Testing: 1.92s
+...
+```
+
+### MNIST Demo w/ 2D Class Sums
+
+The following code demonstrates how to retrieve the class sums for each class after each epoch. This returns a 2d array with the sum of all clauses for each class.
+
+#### Code: MNISTDemo2DClassSums.py
+
+```python
+from pyTsetlinMachineParallel.tm import MultiClassTsetlinMachine
+import numpy as np
+from time import time
+
+from keras.datasets import mnist
+
+(X_train, Y_train), (X_test, Y_test) = mnist.load_data()
+
+X_train = np.where(X_train.reshape((X_train.shape[0], 28*28)) > 75, 1, 0) 
+X_test = np.where(X_test.reshape((X_test.shape[0], 28*28)) > 75, 1, 0) 
+
+tm = MultiClassTsetlinMachine(2000, 50, 10.0)
+epochs = 50
+
+print(f"\nAccuracy over {epochs} epochs:\n")
+for i in range(epochs):
+    start_training = time()
+    tm.fit(X_train, Y_train, epochs=1, incremental=True)
+    stop_training = time()
+
+    start_testing = time()
+    prediction, class_sums = tm.predict_class_sums_2d(X_test)
+    result = 100*(prediction == Y_test).mean()
+    stop_testing = time()
+    
+    print(f"Class sums:\n{class_sums}")
+
+    print("#%d Accuracy: %.2f%% Training: %.2fs Testing: %.2fs" % (i+1, result, stop_training-start_training, stop_testing-start_testing))
+```
+
+#### Output
+
+```bash
+Accuracy over 50 epochs:
+
+Class sums:
+[[-50 -50 -50 ...  50 -50 -50]
+ [-35 -30  37 ... -50 -19 -50]
+ [-50  50 -50 ... -50 -50 -50]
+ ...
+ [-50 -50 -50 ... -50 -40 -23]
+ [-45 -47 -50 ... -50  30 -50]
+ [-48 -50 -50 ... -50 -50 -50]]
+#1 Accuracy: 94.55% Training: 6.01s Testing: 2.26s
+Class sums:
+[[-50 -50 -50 ...  50 -50 -50]
+ [-39 -40  50 ... -50 -29 -50]
+ [-50  50 -50 ... -50 -50 -50]
+ ...
+ [-50 -50 -50 ... -50 -40 -36]
+ [-50 -50 -50 ... -50  13 -50]
+ [-50 -50 -50 ... -50 -50 -50]]
+#2 Accuracy: 95.56% Training: 4.56s Testing: 2.20s
+Class sums:
+[[-50 -50 -50 ...  50 -50 -50]
+ [-50 -39  50 ... -50 -29 -50]
+ [-50  50 -50 ... -50 -50 -50]
+ ...
+ [-50 -50 -50 ... -50 -50 -50]
+ [-50 -50 -50 ... -50   3 -50]
+ [-50 -50 -50 ... -50 -50 -50]]
+#3 Accuracy: 96.21% Training: 4.39s Testing: 2.30s
+Class sums:
+[[-50 -50 -50 ...  50 -50 -50]
+ [-35 -30  37 ... -50 -35 -50]
+ [-50  50 -50 ... -50 -50 -50]
+ ...
+ [-50 -50 -50 ... -50 -50 -44]
+ [-50 -50 -50 ... -50  10 -50]
+ [-50 -50 -50 ... -50 -50 -50]]
+#4 Accuracy: 96.44% Training: 4.26s Testing: 2.17s
 ...
 ```
 

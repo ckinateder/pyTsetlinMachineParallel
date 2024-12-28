@@ -19,7 +19,7 @@ for i in range(epochs):
     stop_training = time()
 
     start_testing = time()
-    prediction, class_sums = tm.predict_class_sums_2d(X_test, return_class_sums=True)
+    prediction, class_sums = tm.predict_class_sums_2d(X_test)
     result = 100*(prediction == Y_test).mean()
     stop_testing = time()
     

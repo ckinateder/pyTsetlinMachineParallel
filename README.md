@@ -468,7 +468,7 @@ for i in range(epochs):
     result = 100*(prediction == Y_test).mean()
     stop_testing = time()
     
-    print(f"Class sums: {class_sums}")
+    print(f"Class sums:\n{class_sums}")
 
     print("#%d Accuracy: %.2f%% Training: %.2fs Testing: %.2fs" % (i+1, result, stop_training-start_training, stop_testing-start_testing))
 ```
@@ -480,12 +480,42 @@ python3 ./MNISTDemoClassSums.py
 
 Accuracy over 50 epochs:
 
-Class sums: [50 47 50 ... 50 50 50]
-#1 Accuracy: 94.60% Training: 5.27s Testing: 2.13s
-Class sums: [50 34 50 ... 50 50 50]
-#2 Accuracy: 95.41% Training: 4.38s Testing: 2.00s
-Class sums: [50 50 50 ... 50 50 50]
-#3 Accuracy: 96.00% Training: 4.16s Testing: 1.92s
+Class sums:
+[[50 50 50 ... 40  3 50]
+ [50 50 50 ... 50 25 50]
+ [50 50 50 ... 50 50 50]
+ ...
+ [ 0  0  0 ...  0  0  0]
+ [ 0  0  0 ...  0  0  0]
+ [ 0  0  0 ...  0  0  0]]
+#1 Accuracy: 94.44% Training: 5.28s Testing: 2.22s
+Class sums:
+[[50 48 50 ... 35  0 50]
+ [50 50 50 ... 50 24 50]
+ [50 50 50 ... 50 50 50]
+ ...
+ [ 0  0  0 ...  0  0  0]
+ [ 0  0  0 ...  0  0  0]
+ [ 0  0  0 ...  0  0  0]]
+#2 Accuracy: 95.65% Training: 4.51s Testing: 2.13s
+Class sums:
+[[50 46 50 ... 50  9 50]
+ [50 50 50 ... 50 17 50]
+ [50 50 50 ... 50 50 50]
+ ...
+ [ 0  0  0 ...  0  0  0]
+ [ 0  0  0 ...  0  0  0]
+ [ 0  0  0 ...  0  0  0]]
+#3 Accuracy: 95.87% Training: 4.31s Testing: 2.10s
+Class sums:
+[[50 50 50 ... 42 15 50]
+ [50 50 50 ... 50 10 50]
+ [50 50 50 ... 50 50 50]
+ ...
+ [ 0  0  0 ...  0  0  0]
+ [ 0  0  0 ...  0  0  0]
+ [ 0  0  0 ...  0  0  0]]
+#4 Accuracy: 96.40% Training: 4.12s Testing: 2.09s
 ...
 ```
 

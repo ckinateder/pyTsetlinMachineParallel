@@ -48,6 +48,8 @@ void mc_tm_predict(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int 
 
 void mc_tm_predict_with_class_sums(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, int *class_sums, int number_of_examples);
 
+void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, int *class_sums, int number_of_examples);
+
 void mc_tm_fit(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int y[], int number_of_examples, int epochs);
 
 void mc_tm_get_state(struct MultiClassTsetlinMachine *mc_tm, int class, unsigned int *clause_weights, unsigned int *ta_state);

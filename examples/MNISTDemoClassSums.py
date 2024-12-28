@@ -23,6 +23,6 @@ for i in range(epochs):
     result = 100*(prediction == Y_test).mean()
     stop_testing = time()
     
-    print(f"Class sums: {class_sums}")
+    print(f"Class sums:\n{class_sums}")
 
     print("#%d Accuracy: %.2f%% Training: %.2fs Testing: %.2fs" % (i+1, result, stop_training-start_training, stop_testing-start_testing))

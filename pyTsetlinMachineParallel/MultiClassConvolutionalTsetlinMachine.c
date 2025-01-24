@@ -384,43 +384,58 @@ void mc_tm_set_state(struct MultiClassTsetlinMachine *mc_tm, int class, unsigned
 	return;
 }
 
-/******************************************************************************/
-/*** Clause Based Transformation of Input Examples for Multi-layer Learning ***/
-/******************************************************************************/
+/*******************************************************************************
+**** Clause Based Transformation of Input Examples for Multi-layer Learning ****
+The transformation essentially creates a new binary feature for each clause in 
+each class. The value of each new feature is determined by whether the 
+corresponding clause evaluates to true or false for the input example, with the
+possibility of inverting this relationship based on the invert parameter. Thus,
+the output shape when unraveled is 
+(number_of_examples, number_of_classes * number_of_clauses).
+*******************************************************************************/
 
 void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  unsigned int *X_transformed, int invert, int number_of_examples)
 {
+	// Calculate how much memory is needed for each step
 	unsigned int step_size = mc_tm->number_of_patches * mc_tm->number_of_ta_chunks;
 	
+	// Recreate the Tsetlin Machine for each thread using the same state and weights as the original machine
+	// This block is mostly memory allocation and copying of the state and weights
 	int max_threads = omp_get_max_threads();
 	struct MultiClassTsetlinMachine **mc_tm_thread = (void *)malloc(sizeof(struct MultiClassTsetlinMachine *) * max_threads);
 	struct TsetlinMachine *tm = mc_tm->tsetlin_machines[0];
 	for (int t = 0; t < max_threads; t++) {
 		mc_tm_thread[t] = CreateMultiClassTsetlinMachine(mc_tm->number_of_classes, tm->number_of_clauses, tm->number_of_features, tm->number_of_patches, tm->number_of_ta_chunks, tm->number_of_state_bits, tm->T, tm->s, tm->s_range, tm->boost_true_positive_feedback, tm->weighted_clauses);
 		for (int i = 0; i < mc_tm->number_of_classes; i++) {
-			free(mc_tm_thread[t]->tsetlin_machines[i]->ta_state);
-			mc_tm_thread[t]->tsetlin_machines[i]->ta_state = mc_tm->tsetlin_machines[i]->ta_state;
-			free(mc_tm_thread[t]->tsetlin_machines[i]->clause_weights);
-			mc_tm_thread[t]->tsetlin_machines[i]->clause_weights = mc_tm->tsetlin_machines[i]->clause_weights;
+			free(mc_tm_thread[t]->tsetlin_machines[i]->ta_state); // Free the ta_state
+			mc_tm_thread[t]->tsetlin_machines[i]->ta_state = mc_tm->tsetlin_machines[i]->ta_state; // Copy the ta_state
+			free(mc_tm_thread[t]->tsetlin_machines[i]->clause_weights); // Free the clause_weights
+			mc_tm_thread[t]->tsetlin_machines[i]->clause_weights = mc_tm->tsetlin_machines[i]->clause_weights; // Copy the clause_weights
 		}	
 	}
 	
-	#pragma omp parallel for
+	#pragma omp parallel for // Parallelize the loop over examples
 	for (int l = 0; l < number_of_examples; l++) {
+		// Get the thread id
 		int thread_id = omp_get_thread_num();
+		// Get the position of the example in the input array
 		unsigned int pos = l*step_size;
 		
+		// Process each class
 		for (int i = 0; i < mc_tm->number_of_classes; i++) {	
+			// Calculate clause score for each class. I don't know where the clause output is stored.
 			tm_score(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos]);
 
 			for (int j = 0; j < mc_tm->tsetlin_machines[i]->number_of_clauses; ++j) {
+				// Calculate position in transformed feature space
 				unsigned long transformed_feature = l*mc_tm->number_of_classes*mc_tm->tsetlin_machines[i]->number_of_clauses + i*mc_tm->tsetlin_machines[i]->number_of_clauses + j;
 					
+				// Get the clause output from the bit packed format
 				int clause_chunk = j / 32;
 				int clause_pos = j % 32;
-
 				int clause_output = (mc_tm_thread[thread_id]->tsetlin_machines[i]->clause_output[clause_chunk] & (1 << clause_pos)) > 0;
 	
+				// Store the transformed feature in the output array
 				if (clause_output && !invert) {
 					X_transformed[transformed_feature] = 1;
 				} else if (!clause_output && invert) {
@@ -431,6 +446,8 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
 			} 
 		}
 	}
+
+	// TODO: Free the memory allocated for the threads
 	
 	return;
 }

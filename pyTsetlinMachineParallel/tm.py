@@ -403,6 +403,20 @@ class MultiClassTsetlinMachine():
 		_lib.mc_tm_transform(self.mc_tm, self.encoded_X, X_transformed, inverted, number_of_examples)
 
 		return X_transformed.reshape((number_of_examples, self.number_of_classes*self.number_of_clauses))
+	
+	def encode(self, X):
+		number_of_examples = X.shape[0]
+
+		self.encoded_X = np.ascontiguousarray(np.empty(int(number_of_examples * self.number_of_ta_chunks), dtype=np.uint32))
+
+		Xm = np.ascontiguousarray(X.flatten()).astype(np.uint32)
+
+		if self.append_negated:
+			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features//2, 1, 1, self.number_of_features//2, 1, 1)
+		else:
+			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
+
+		return self.encoded_X
 
 class RegressionTsetlinMachine():
 	def __init__(self, number_of_clauses, T, s, boost_true_positive_feedback=1, number_of_state_bits=8, weighted_clauses=False, s_range=False):

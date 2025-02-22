@@ -400,12 +400,14 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
 	unsigned int step_size = mc_tm->number_of_patches * mc_tm->number_of_ta_chunks;
 	
 	// Recreate the Tsetlin Machine for each thread using the same state and weights as the original machine
-	// This block is mostly memory allocation and copying of the state and weights
+	// This block is just memory allocation and copying of the state and weights
 	int max_threads = omp_get_max_threads();
 	struct MultiClassTsetlinMachine **mc_tm_thread = (void *)malloc(sizeof(struct MultiClassTsetlinMachine *) * max_threads);
 	struct TsetlinMachine *tm = mc_tm->tsetlin_machines[0];
 	for (int t = 0; t < max_threads; t++) {
-		mc_tm_thread[t] = CreateMultiClassTsetlinMachine(mc_tm->number_of_classes, tm->number_of_clauses, tm->number_of_features, tm->number_of_patches, tm->number_of_ta_chunks, tm->number_of_state_bits, tm->T, tm->s, tm->s_range, tm->boost_true_positive_feedback, tm->weighted_clauses);
+		mc_tm_thread[t] = CreateMultiClassTsetlinMachine(mc_tm->number_of_classes, tm->number_of_clauses, tm->number_of_features, 
+															tm->number_of_patches, tm->number_of_ta_chunks, tm->number_of_state_bits,
+															tm->T, tm->s, tm->s_range, tm->boost_true_positive_feedback, tm->weighted_clauses);
 		for (int i = 0; i < mc_tm->number_of_classes; i++) {
 			free(mc_tm_thread[t]->tsetlin_machines[i]->ta_state); // Free the ta_state
 			mc_tm_thread[t]->tsetlin_machines[i]->ta_state = mc_tm->tsetlin_machines[i]->ta_state; // Copy the ta_state
@@ -423,12 +425,13 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
 		
 		// Process each class
 		for (int i = 0; i < mc_tm->number_of_classes; i++) {	
-			// Calculate clause score for each class. I don't know where the clause output is stored.
+			// Calculate clause score for each class. Clause outputs are stored in tm
 			tm_score(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos]);
 
 			for (int j = 0; j < mc_tm->tsetlin_machines[i]->number_of_clauses; ++j) {
 				// Calculate position in transformed feature space
-				unsigned long transformed_feature = l*mc_tm->number_of_classes*mc_tm->tsetlin_machines[i]->number_of_clauses + i*mc_tm->tsetlin_machines[i]->number_of_clauses + j;
+				unsigned long transformed_feature = l*mc_tm->number_of_classes*mc_tm->tsetlin_machines[i]->number_of_clauses + 
+													i*mc_tm->tsetlin_machines[i]->number_of_clauses + j;
 					
 				// Get the clause output from the bit packed format
 				int clause_chunk = j / 32;

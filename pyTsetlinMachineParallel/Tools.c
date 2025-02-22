@@ -28,6 +28,11 @@ https://arxiv.org/abs/1905.09688
 #include <stdio.h>
 #include <string.h>
 
+/*
+Example call from the python code:
+_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features//2, 1, 1, self.number_of_features//2, 1, 1)
+*/
+
 void tm_encode(unsigned int *X, unsigned int *encoded_X, int number_of_examples, int dim_x, int dim_y, int dim_z, int patch_dim_x, int patch_dim_y, int append_negated)
 {
 	int global_number_of_features = dim_x * dim_y * dim_z;

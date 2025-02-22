@@ -359,6 +359,12 @@ class MultiClassTsetlinMachine():
 		Y, class_sums = self.predict_class_sums_2d(X)
 		soft_labels =  np.exp(class_sums / temperature) / np.sum(np.exp(class_sums / temperature), axis=1, keepdims=True)
 		return soft_labels
+	
+	def get_output_probabilities(self, X):
+		_, class_sums = self.predict_class_sums_2d(X)
+		# convert class_sums to probabilities, sum of each row should be 1
+		output_probabilities = class_sums / np.sum(class_sums, axis=1, keepdims=True)
+		return output_probabilities
 
 	
 	def ta_state(self, mc_tm_class, clause, ta):

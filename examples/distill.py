@@ -90,9 +90,12 @@ from keras.datasets import mnist
 X_train = np.where(X_train.reshape((X_train.shape[0], 28*28)) > 75, 1, 0) 
 X_test = np.where(X_test.reshape((X_test.shape[0], 28*28)) > 75, 1, 0) 
 ts = (20, 10)
-teacher = MultiClassTsetlinMachine(400, *ts)
-student = MultiClassTsetlinMachine(100, *ts)
+student_num_clauses = 100
+teacher_num_clauses = 800
+teacher = MultiClassTsetlinMachine(teacher_num_clauses, *ts)
+student = MultiClassTsetlinMachine(student_num_clauses, *ts)
 epochs = 10
+
 #"""
 print(f"Training teacher")
 for i in range(epochs):
@@ -124,7 +127,7 @@ for i in range(epochs):
 	print("#%d Accuracy: %.2f%% Training: %.2fs Testing: %.2fs" % (i+1, result, stop_training-start_training, stop_testing-start_testing))
 
 print(f"Training baseline student")
-student = MultiClassTsetlinMachine(100, *ts)
+student = MultiClassTsetlinMachine(student_num_clauses, *ts)
 for i in range(epochs):
 	start_training = time()
 	student.fit(X_train, Y_train, epochs=1, incremental=True)

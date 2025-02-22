@@ -355,14 +355,14 @@ class MultiClassTsetlinMachine():
 		_lib.mc_tm_predict_with_class_sums_2d(self.mc_tm, self.encoded_X, Y, class_sums, number_of_examples)
 		return Y, class_sums
 	
-	def predict_soft_labels(self, X, temperature=1.0):
+	def get_soft_labels(self, X, temperature=1.0):
 		Y, class_sums = self.predict_class_sums_2d(X)
 		soft_labels =  np.exp(class_sums / temperature) / np.sum(np.exp(class_sums / temperature), axis=1, keepdims=True)
 		return soft_labels
 	
 	def get_output_probabilities(self, X):
 		_, class_sums = self.predict_class_sums_2d(X)
-		# convert class_sums to probabilities, sum of each row should be 1
+		class_sums += abs(np.min(class_sums))
 		output_probabilities = class_sums / np.sum(class_sums, axis=1, keepdims=True)
 		return output_probabilities
 

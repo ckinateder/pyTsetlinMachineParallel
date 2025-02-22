@@ -108,6 +108,9 @@ _lib.tm_predict_regression.argtypes = [ctm_pointer, array_1d_uint, array_1d_int,
 _lib.tm_encode.restype = None                      
 _lib.tm_encode.argtypes = [array_1d_uint, array_1d_uint, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int] 
 
+_lib.mc_tm_fit_soft.restype = None                      
+_lib.mc_tm_fit_soft.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int]
+
 class MultiClassConvolutionalTsetlinMachine2D():
 	def __init__(self, number_of_clauses, T, s, patch_dim, boost_true_positive_feedback=1, number_of_state_bits=8, append_negated=True, weighted_clauses=False, s_range=False):
 		self.number_of_clauses = number_of_clauses
@@ -419,6 +422,38 @@ class MultiClassTsetlinMachine():
 			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
 
 		return self.encoded_X
+
+	def fit_soft(self, X, Y, soft_labels, epochs=100, incremental=False):
+		number_of_examples = X.shape[0]
+
+		if self.mc_tm == None:
+			self.number_of_classes = int(np.max(Y) + 1)
+			if self.append_negated:
+				self.number_of_features = X.shape[1]*2
+			else:
+				self.number_of_features = X.shape[1]
+
+			self.number_of_patches = 1
+			self.number_of_ta_chunks = int((self.number_of_features-1)/32 + 1)
+			self.mc_tm = _lib.CreateMultiClassTsetlinMachine(self.number_of_classes, self.number_of_clauses, self.number_of_features, 1, self.number_of_ta_chunks, self.number_of_state_bits, self.T, self.s, self.s_range, self.boost_true_positive_feedback, self.weighted_clauses)
+		elif incremental == False:
+			_lib.mc_tm_destroy(self.mc_tm)
+			self.mc_tm = _lib.CreateMultiClassTsetlinMachine(self.number_of_classes, self.number_of_clauses, self.number_of_features, 1, self.number_of_ta_chunks, self.number_of_state_bits, self.T, self.s, self.s_range, self.boost_true_positive_feedback, self.weighted_clauses)
+
+		self.encoded_X = np.ascontiguousarray(np.empty(int(number_of_examples * self.number_of_ta_chunks), dtype=np.uint32))
+
+		Xm = np.ascontiguousarray(X.flatten()).astype(np.uint32)
+		Ym = np.ascontiguousarray(Y).astype(np.uint32)
+		Softm = np.ascontiguousarray(soft_labels).astype(np.float32)
+
+		if self.append_negated:
+			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features//2, 1, 1, self.number_of_features//2, 1, 1)
+		else:
+			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
+		
+		_lib.mc_tm_fit_soft(self.mc_tm, self.encoded_X, Ym, Softm, number_of_examples, epochs)
+
+		return
 
 class RegressionTsetlinMachine():
 	def __init__(self, number_of_clauses, T, s, boost_true_positive_feedback=1, number_of_state_bits=8, weighted_clauses=False, s_range=False):

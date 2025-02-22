@@ -64,3 +64,5 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
 
 void mc_tm_clause_configuration(struct MultiClassTsetlinMachine *mc_tm, int class, int clause, unsigned int *clause_configuration);
 
+void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs);
+

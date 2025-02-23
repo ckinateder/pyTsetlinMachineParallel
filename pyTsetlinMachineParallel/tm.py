@@ -455,6 +455,67 @@ class MultiClassTsetlinMachine():
 
 		return
 
+	def get_top_clause_indices(self, class_idx, n_clauses):
+		"""
+		Returns indices of top n_clauses for specified class
+		Ordered by clause weight descending
+		"""
+		clause_weights = self.get_state()[class_idx][0]
+		return np.argsort(-clause_weights)[:n_clauses]
+
+	def init_from_teacher(self, teacher, clauses_per_class, X, Y):
+		"""
+		Initialize student with top clauses from teacher
+		teacher: Trained MultiClassTsetlinMachine instance
+		clauses_per_class: Number of clauses to transfer per class
+		"""
+		# Validate compatibility and initialize TM
+		if self.mc_tm == None:
+			self.number_of_classes = int(np.max(Y) + 1)
+			if self.append_negated:
+				self.number_of_features = X.shape[1]*2
+			else:
+				self.number_of_features = X.shape[1]
+
+			self.number_of_patches = 1
+			self.number_of_ta_chunks = int((self.number_of_features-1)/32 + 1)
+			self.mc_tm = _lib.CreateMultiClassTsetlinMachine(self.number_of_classes, self.number_of_clauses, self.number_of_features, 1, self.number_of_ta_chunks, self.number_of_state_bits, self.T, self.s, self.s_range, self.boost_true_positive_feedback, self.weighted_clauses)
+		
+		if self.number_of_features != teacher.number_of_features:
+			raise ValueError("Student and teacher must have same number of features")
+		if self.number_of_state_bits != teacher.number_of_state_bits:
+			raise ValueError("Student and teacher must have same number of state bits")
+
+		student_state = self.get_state()
+		
+		for class_idx in range(self.number_of_classes):
+			# Get teacher clauses for this class
+			t_weights, t_ta = teacher.get_state()[class_idx]
+			top_indices = teacher.get_top_clause_indices(class_idx, clauses_per_class)
+			
+			# Get student state for this class
+			s_weights, s_ta = student_state[class_idx]
+			
+			# Calculate how many clauses we can actually transfer
+			n_copy = min(len(top_indices), len(s_weights))
+			
+			# Copy weights and TA states
+			ta_per_clause = self.number_of_ta_chunks * self.number_of_state_bits
+			for i in range(n_copy):
+				src = top_indices[i]
+				dest = i
+				
+				# Copy clause weight
+				s_weights[dest] = t_weights[src]
+				
+				# Copy TA states
+				start = dest * ta_per_clause
+				end = (dest + 1) * ta_per_clause
+				s_ta[start:end] = t_ta[src*ta_per_clause:(src+1)*ta_per_clause]
+		
+		self.set_state(student_state)
+		return self
+
 class RegressionTsetlinMachine():
 	def __init__(self, number_of_clauses, T, s, boost_true_positive_feedback=1, number_of_state_bits=8, weighted_clauses=False, s_range=False):
 		self.number_of_clauses = number_of_clauses

@@ -397,95 +397,164 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
 // Add new function for soft label training
 void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs)
 {
-	unsigned int step_size = mc_tm->number_of_patches * mc_tm->number_of_ta_chunks;
+    /*------------------------------------------------------------*/
+    /* Initialization and Setup                                   */
+    /*------------------------------------------------------------*/
+    // Calculate input data stride between consecutive examples
+    unsigned int step_size = mc_tm->number_of_patches * mc_tm->number_of_ta_chunks;
 
-	int max_threads = omp_get_max_threads();
-	struct MultiClassTsetlinMachine **mc_tm_thread = (void *)malloc(sizeof(struct MultiClassTsetlinMachine *) * max_threads);
-	struct TsetlinMachine *tm = mc_tm->tsetlin_machines[0];
-	
-	for (int i = 0; i < mc_tm->number_of_classes; i++) {
-		mc_tm->tsetlin_machines[i]->clause_lock = (omp_lock_t *)malloc(sizeof(omp_lock_t) * tm->number_of_clauses);
-		for (int j = 0; j < tm->number_of_clauses; ++j) {
-			omp_init_lock(&mc_tm->tsetlin_machines[i]->clause_lock[j]);
-		}
-	}
+    // Get maximum available threads for parallel processing
+    int max_threads = omp_get_max_threads();
+    
+    // Allocate thread-local TM instances
+    struct MultiClassTsetlinMachine **mc_tm_thread = 
+        (void *)malloc(sizeof(struct MultiClassTsetlinMachine *) * max_threads);
+    struct TsetlinMachine *tm = mc_tm->tsetlin_machines[0];
+    
+    /*------------------------------------------------------------*/
+    /* Clause Lock Initialization                                 */
+    /*------------------------------------------------------------*/
+    // Initialize OpenMP locks for thread-safe clause updates
+    for (int i = 0; i < mc_tm->number_of_classes; i++) {
+        // Allocate array of locks (one per clause)
+        mc_tm->tsetlin_machines[i]->clause_lock = 
+            (omp_lock_t *)malloc(sizeof(omp_lock_t) * tm->number_of_clauses);
+        
+        // Initialize each lock
+        for (int j = 0; j < tm->number_of_clauses; ++j) {
+            omp_init_lock(&mc_tm->tsetlin_machines[i]->clause_lock[j]);
+        }
+    }
 
-	for (int t = 0; t < max_threads; t++) {
-		mc_tm_thread[t] = CreateMultiClassTsetlinMachine(mc_tm->number_of_classes, tm->number_of_clauses, tm->number_of_features, tm->number_of_patches, tm->number_of_ta_chunks, tm->number_of_state_bits, tm->T, tm->s, tm->s_range, tm->boost_true_positive_feedback, tm->weighted_clauses);
-		for (int i = 0; i < mc_tm->number_of_classes; i++) {
-			free(mc_tm_thread[t]->tsetlin_machines[i]->ta_state);
-			mc_tm_thread[t]->tsetlin_machines[i]->ta_state = mc_tm->tsetlin_machines[i]->ta_state;
-			free(mc_tm_thread[t]->tsetlin_machines[i]->clause_weights);
-			mc_tm_thread[t]->tsetlin_machines[i]->clause_weights = mc_tm->tsetlin_machines[i]->clause_weights;
-			mc_tm_thread[t]->tsetlin_machines[i]->clause_lock = mc_tm->tsetlin_machines[i]->clause_lock;
-		}    
-	}
+    /*------------------------------------------------------------*/
+    /* Thread-Local TM Setup                                      */
+    /*------------------------------------------------------------*/
+    // Create thread-specific TM instances with shared state
+    for (int t = 0; t < max_threads; t++) {
+        // Create skeleton TM structure
+        mc_tm_thread[t] = CreateMultiClassTsetlinMachine(
+            mc_tm->number_of_classes, 
+            tm->number_of_clauses,
+            tm->number_of_features,
+            tm->number_of_patches,
+            tm->number_of_ta_chunks,
+            tm->number_of_state_bits,
+            tm->T,
+            tm->s,
+            tm->s_range,
+            tm->boost_true_positive_feedback,
+            tm->weighted_clauses
+        );
+        
+        // Share actual state between threads
+        for (int i = 0; i < mc_tm->number_of_classes; i++) {
+            // Share TA states
+            free(mc_tm_thread[t]->tsetlin_machines[i]->ta_state);
+            mc_tm_thread[t]->tsetlin_machines[i]->ta_state = 
+                mc_tm->tsetlin_machines[i]->ta_state;
+            
+            // Share clause weights
+            free(mc_tm_thread[t]->tsetlin_machines[i]->clause_weights);
+            mc_tm_thread[t]->tsetlin_machines[i]->clause_weights = 
+                mc_tm->tsetlin_machines[i]->clause_weights;
+            
+            // Share clause locks
+            mc_tm_thread[t]->tsetlin_machines[i]->clause_lock = 
+                mc_tm->tsetlin_machines[i]->clause_lock;
+        }    
+    }
 
-	for (int epoch = 0; epoch < epochs; epoch++) {
-		#pragma omp parallel for
-		for (int l = 0; l < number_of_examples; l++) {
-			int thread_id = omp_get_thread_num();
-			unsigned int pos = l*step_size;
-			
-			int target_class = y[l];
-			float *example_soft_labels = &soft_labels[l * mc_tm->number_of_classes];
-			
-			// Update target class with positive example
-			tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], &X[pos], 1);
+    /*------------------------------------------------------------*/
+    /* Main Training Loop                                          */
+    /*------------------------------------------------------------*/
+    for (int epoch = 0; epoch < epochs; epoch++) {
+        // Process examples in parallel using OpenMP
+        #pragma omp parallel for
+        for (int l = 0; l < number_of_examples; l++) {
+            // Get thread ID and example position
+            int thread_id = omp_get_thread_num();
+            unsigned int pos = l * step_size;
+            
+            // Get true class label for this example
+            int target_class = y[l];
+            
+            // Pointer to soft label probabilities (num_classes elements)
+            float *example_soft_labels = &soft_labels[l * mc_tm->number_of_classes];
+            
+            /*----------------------------------------------------*/
+            /* Positive Class Update                             */
+            /*----------------------------------------------------*/
+            // Always reinforce the true class with Type I feedback
+            tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], 
+                     &X[pos], 1);
 
-			// Select negative class based on soft probabilities
-			float total = 0.0f;
-			for (int i = 0; i < mc_tm->number_of_classes; i++) {
-				if (i != target_class) {
-					total += example_soft_labels[i];
-				}
-			}
-			
-			int negative_class;
-			if (total == 0) {
-				do {
-					negative_class = fast_rand() % mc_tm->number_of_classes;
-				} while (negative_class == target_class);
-			} else {
-				float threshold = (float)fast_rand() / FAST_RAND_MAX * total;
-				float cumulative = 0.0f;
-				for (int i = 0; i < mc_tm->number_of_classes; i++) {
-					if (i == target_class) continue;
-					cumulative += example_soft_labels[i];
-					if (cumulative >= threshold) {
-						negative_class = i;
-						break;
-					}
-				}
-			}
+            /*----------------------------------------------------*/
+            /* Negative Class Selection                          */
+            /*----------------------------------------------------*/
+            // Calculate total probability mass for negative classes
+            float total = 0.0f;
+            for (int i = 0; i < mc_tm->number_of_classes; i++) {
+                if (i != target_class) {
+                    total += example_soft_labels[i];
+                }
+            }
+            
+            int negative_class;
+            if (total == 0) {
+                // Fallback: Random selection when no probability mass
+                do {
+                    negative_class = fast_rand() % mc_tm->number_of_classes;
+                } while (negative_class == target_class);
+            } else {
+                // Proportional sampling using inverse transform method
+                float threshold = (float)fast_rand() / FAST_RAND_MAX * total;
+                float cumulative = 0.0f;
+                
+                // Find first class where cumulative probability >= threshold
+                for (int i = 0; i < mc_tm->number_of_classes; i++) {
+                    if (i == target_class) continue; // Skip target class
+                    
+                    cumulative += example_soft_labels[i];
+                    if (cumulative >= threshold) {
+                        negative_class = i;
+                        break;
+                    }
+                }
+            }
 
-			// Update negative class with negative example
-			tm_update(mc_tm_thread[thread_id]->tsetlin_machines[negative_class], &X[pos], 0);
-		}
-	}
+            /*----------------------------------------------------*/
+            /* Negative Class Update                             */
+            /*----------------------------------------------------*/
+            // Apply Type II feedback to selected negative class
+            tm_update(mc_tm_thread[thread_id]->tsetlin_machines[negative_class], 
+                     &X[pos], 0);
+        }
+    }
 
-	// Cleanup code remains same as original mc_tm_fit
-	for (int i = 0; i < mc_tm->number_of_classes; i++) {
-		for (int j = 0; j < tm->number_of_clauses; ++j) {
-			omp_destroy_lock(&mc_tm->tsetlin_machines[i]->clause_lock[j]);
-		}
-	}
+    /*------------------------------------------------------------*/
+    /* Cleanup and Resource Release                               */
+    /*------------------------------------------------------------*/
+    // Destroy clause locks
+    for (int i = 0; i < mc_tm->number_of_classes; i++) {
+        for (int j = 0; j < tm->number_of_clauses; ++j) {
+            omp_destroy_lock(&mc_tm->tsetlin_machines[i]->clause_lock[j]);
+        }
+    }
 
-	for (int t = 0; t < max_threads; t++) {
-		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {    
-			struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
-			free(tm_thread->clause_output);
-			free(tm_thread->output_one_patches);
-			free(tm_thread->feedback_to_la);
-			free(tm_thread->feedback_to_clauses);
-			free(tm_thread);
-		}
-	}
+    // Free thread-local TM instances
+    for (int t = 0; t < max_threads; t++) {
+        for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {    
+            struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
+            // Free temporary buffers while preserving shared state
+            free(tm_thread->clause_output);
+            free(tm_thread->output_one_patches);
+            free(tm_thread->feedback_to_la);
+            free(tm_thread->feedback_to_clauses);
+            free(tm_thread);
+        }
+    }
 
-	free(tm->clause_lock);
-	free(mc_tm_thread);
+    // Final memory cleanup
+    free(tm->clause_lock);
+    free(mc_tm_thread);
 }
-
-
-
-

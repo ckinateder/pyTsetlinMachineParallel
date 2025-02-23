@@ -10,11 +10,11 @@ from keras.datasets import mnist
 X_train = np.where(X_train.reshape((X_train.shape[0], 28*28)) > 75, 1, 0) 
 X_test = np.where(X_test.reshape((X_test.shape[0], 28*28)) > 75, 1, 0) 
 
-teacher_params = (200, 10, 10)
-student_params = (50, 10, 10)
+teacher_params = (200, 10, 5)
+student_params = (50, 10, 5)
 
 teacher = MultiClassTsetlinMachine(*teacher_params)
-teacher_epochs = 10
+teacher_epochs = 5
 student_epochs = 10
 skip_train_result = True
 temperature = 4
@@ -49,6 +49,11 @@ for i in range(student_epochs+teacher_epochs):
     else:
         print("#%02d Training: %.2fs || Accuracy (train) (%.2fs): %.2f%% | Accuracy (test) (%.2fs): %.2f%%" % (i+1, train_time, train_result_time, train_result, test_time, test_result))
 
+start_testing = time()
+test_result = 100*(student.predict(X_test) == Y_test).mean()
+stop_testing = time()
+student_test_time = stop_testing-start_testing
+print(f"Baseline student accuracy: {test_result:.2f}% ({student_test_time:.2f}s)")
 baseline_student_acc = test_result
 
 print(f"Training baseline teacher for {teacher_epochs} epochs")
@@ -64,7 +69,12 @@ for i in range(teacher_epochs+student_epochs):
         print("Saving teacher checkpoint")
         dump(teacher, open("teacher_checkpoint.pkl", "wb"))
 
+start_testing = time()
+test_result = 100*(teacher.predict(X_test) == Y_test).mean()
+stop_testing = time()
+teacher_test_time = stop_testing-start_testing
 baseline_teacher_acc = test_result
+print(f"Baseline teacher accuracy: {baseline_teacher_acc:.2f}% ({teacher_test_time:.2f}s)")
 
 print(f"Loading teacher checkpoint @ epoch {teacher_epochs}")
 
@@ -75,9 +85,14 @@ print(f"Initializing student with {student_params[0]} clauses from teacher")
 student.init_from_teacher(teacher, student_params[0], X_train, Y_train)
 print(f"Generating soft labels from teacher with temperature {temperature}")
 soft_labels = teacher.get_soft_labels(X_train, temperature=temperature)
+print("First 5 soft labels:")
+for i in range(5):
+    label_row = soft_labels[i]
+    print(f" [" + " ".join([f"{x:.2e}" for x in label_row]) + "]")
+
 print(f"Training student with soft labels")
 
-for i in range(student_epochs, teacher_epochs+student_epochs):
+for i in range(teacher_epochs, teacher_epochs+student_epochs):
     start_training = time()
     student.fit_soft(X_train, Y_train, soft_labels, epochs=1, incremental=True)
     stop_training = time()
@@ -97,3 +112,24 @@ for i in range(student_epochs, teacher_epochs+student_epochs):
         train_result_time = stop_train_result-start_train_result
 
         print("#%02d Training: %.2fs || Accuracy (train) (%.2fs): %.2f%% | Accuracy (test) (%.2fs): %.2f%%" % (i+1, train_time, train_result_time, train_result, test_time, test_result))
+
+
+start_testing = time()
+test_result = 100*(student.predict(X_test) == Y_test).mean()
+stop_testing = time()
+distilled_test_time = stop_testing-start_testing
+distilled_student_acc = test_result
+
+print(f"Distilled student accuracy: {distilled_student_acc:.2f}% ({distilled_test_time:.2f}s)")
+
+# now compare all accuracies and times
+print("--------------------------------")
+print(f"Student trained for {student_epochs+teacher_epochs} epochs")
+print(f"Teacher trained for {student_epochs+teacher_epochs} epochs, checkpointed at epoch {teacher_epochs}")
+print(f"Distilled student trained for {student_epochs} epochs with soft labels from teacher @ epoch {teacher_epochs}")
+print(f"Student params: {student_params}")
+print(f"Teacher params: {teacher_params}")
+print(f"\nFinal scores:")
+print(f" Baseline student accuracy: {baseline_student_acc:.2f}% ({student_test_time:.2f}s)")
+print(f" Baseline teacher accuracy: {baseline_teacher_acc:.2f}% ({teacher_test_time:.2f}s)")
+print(f" Distilled student accuracy: {distilled_student_acc:.2f}% ({distilled_test_time:.2f}s)")

@@ -6,3 +6,4 @@ build
 *.pyc
 *.so
 .specstory
+data

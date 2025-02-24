@@ -48,6 +48,42 @@ Documentation coming soon at https://pytsetlinmachineparallel.readthedocs.io/en/
 
 Convolutional Tsetlin Machine tutorial, https://github.com/cair/convolutional-tsetlin-machine-tutorial
 
+## Future Work
+
+This implementation is a work in progress. There are more things I plan to look at. Here is the current state:
+
+This works for MNIST. I can't seem to get it to work for KMNIST. I'm not sure why. It seems like the `init_from_teacher` function is making more of an impact than the `fit_soft` function. 
+
+Parameters that work for MNIST (see example down below):
+```json
+teacher_params = {
+    "number_of_clauses": 1000,
+    "T": 10,
+    "s": 4,
+    "boost_true_positive_feedback": 1,
+    "number_of_state_bits": 8,
+    "append_negated": True,
+    "weighted_clauses": True
+}
+
+student_params = {
+    "number_of_clauses": 100,
+    "T": 10,
+    "s": 4,
+    "boost_true_positive_feedback": 1,
+    "number_of_state_bits": 8,
+    "append_negated": True,
+    "weighted_clauses": True
+}
+temperature = 4.0
+```
+
+Things to revist:
+- [ ] `MultiClassTsetlinMachine.init_from_teacher`
+  - [ ] Ensure that all the correct clauses are being transferred
+- [ ] `MultiClassTsetlinMachine.fit_soft`
+  - [ ] Ensure that the soft labels are being generated correctly (no zeros or overflows) (recall that a higher threshold means there will be more variation in the soft labels due to clipping)
+
 ## Examples
 
 ### Multiclass Demo

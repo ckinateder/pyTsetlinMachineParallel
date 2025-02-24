@@ -489,35 +489,54 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
                      &X[pos], 1);
 
             /*----------------------------------------------------*/
-            /* Negative Class Selection                          */
+            /* Negative Class Selection - Improved                */
             /*----------------------------------------------------*/
-            // Calculate total probability mass for negative classes
-            float total = 0.0f;
-            for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                if (i != target_class) {
-                    total += example_soft_labels[i];
-                }
-            }
+            // Hybrid approach: balance between soft probabilities and randomness
+            float randomization_factor = 0.3f; // 30% random selection, 70% soft probabilities
+            float random_val = (float)fast_rand() / FAST_RAND_MAX;
             
-            int negative_class;
-            if (total == 0) {
-                // Fallback: Random selection when no probability mass
+            int negative_class = -1; // Initialize with invalid value
+            
+            if (random_val < randomization_factor) {
+                // Use uniform random selection (like original algorithm)
                 do {
                     negative_class = fast_rand() % mc_tm->number_of_classes;
                 } while (negative_class == target_class);
             } else {
-                // Proportional sampling using inverse transform method
-                float threshold = (float)fast_rand() / FAST_RAND_MAX * total;
-                float cumulative = 0.0f;
-                
-                // Find first class where cumulative probability >= threshold
+                // Calculate total probability mass for negative classes
+                float total = 0.0f;
                 for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                    if (i == target_class) continue; // Skip target class
+                    if (i != target_class) {
+                        total += example_soft_labels[i];
+                    }
+                }
+                
+                if (total <= 0.0001f) { // Effectively zero
+                    // Fallback to random when probabilities are too small
+                    do {
+                        negative_class = fast_rand() % mc_tm->number_of_classes;
+                    } while (negative_class == target_class);
+                } else {
+                    // Proportional sampling using inverse transform method
+                    float threshold = (float)fast_rand() / FAST_RAND_MAX * total;
+                    float cumulative = 0.0f;
                     
-                    cumulative += example_soft_labels[i];
-                    if (cumulative >= threshold) {
-                        negative_class = i;
-                        break;
+                    // Find first class where cumulative probability >= threshold
+                    for (int i = 0; i < mc_tm->number_of_classes; i++) {
+                        if (i == target_class) continue;
+                        
+                        cumulative += example_soft_labels[i];
+                        if (cumulative >= threshold) {
+                            negative_class = i;
+                            break;
+                        }
+                    }
+                    
+                    // Safety check - if we somehow didn't select a class
+                    if (negative_class == -1) {
+                        do {
+                            negative_class = fast_rand() % mc_tm->number_of_classes;
+                        } while (negative_class == target_class);
                     }
                 }
             }

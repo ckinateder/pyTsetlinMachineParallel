@@ -3,17 +3,16 @@ import numpy as np
 from time import time
 from pickle import dump, load
 
-from keras.datasets import mnist, fashion_mnist
+from datasets import MNISTDataset, FashionMNISTDataset, KMNISTDataset, IMDBDataset
 
-(X_train, Y_train), (X_test, Y_test) = mnist.load_data()
+dataset = MNISTDataset()
+X_train, Y_train, X_test, Y_test = dataset.get_data()
 
-X_train = np.where(X_train.reshape((X_train.shape[0], 28*28)) > 75, 1, 0) 
-X_test = np.where(X_test.reshape((X_test.shape[0], 28*28)) > 75, 1, 0) 
 
 teacher_params = {
     "number_of_clauses": 1000,
-    "T": 5,
-    "s": 3,
+    "T": 10,
+    "s": 4.0,
     "boost_true_positive_feedback": 1,
     "number_of_state_bits": 8,
     "append_negated": True,
@@ -21,16 +20,16 @@ teacher_params = {
 }
 
 student_params = {
-    "number_of_clauses": 400,
-    "T": 5,
-    "s": 3,
+    "number_of_clauses": 100,
+    "T": 10,
+    "s": 4.0,
     "boost_true_positive_feedback": 1,
     "number_of_state_bits": 8,
     "append_negated": True,
     "weighted_clauses": True
 }
-teacher_epochs = 30
-student_epochs = 40
+teacher_epochs = 10
+student_epochs = 20
 skip_train_result = True
 temperature = 4
 print(f"Teacher params: {teacher_params}")
@@ -55,7 +54,7 @@ def normal_train_step(model, X_train, Y_train, X_test, Y_test, skip_train_result
 
     return test_result, train_result, stop_training-start_training, stop_train_result-start_train_result, stop_testing-start_testing
 
-print(f"Training baseline student for {student_epochs} epochs")
+print(f"Training baseline student ")
 student = MultiClassTsetlinMachine(**student_params)
 for i in range(student_epochs+teacher_epochs):
     test_result, train_result, train_time, train_result_time, test_time = normal_train_step(student, X_train, Y_train, X_test, Y_test, skip_train_result)
@@ -71,17 +70,19 @@ student_test_time = stop_testing-start_testing
 print(f"Baseline student accuracy: {test_result:.2f}% ({student_test_time:.2f}s)")
 baseline_student_acc = test_result
 
-print(f"Training baseline teacher for {teacher_epochs} epochs")
+print(f"Training baseline teacher")
+best_acc = 0
 teacher = MultiClassTsetlinMachine(**teacher_params)
-for i in range(teacher_epochs+student_epochs):
+for i in range(teacher_epochs):#+student_epochs):
     test_result, train_result, train_time, train_result_time, test_time = normal_train_step(teacher, X_train, Y_train, X_test, Y_test, skip_train_result)
     if skip_train_result:
         print("#%02d Training: %.2fs || Accuracy (test) (%.2fs): %.2f%%" % (i+1, train_time, test_time, test_result))
     else:
         print("#%02d Training: %.2fs || Accuracy (train) (%.2fs): %.2f%% | Accuracy (test) (%.2fs): %.2f%%" % (i+1, train_time, train_result_time, train_result, test_time, test_result))
 
-    if i == teacher_epochs-1:
-        print("Saving teacher checkpoint")
+    if i <= teacher_epochs-1 and test_result > best_acc:
+        best_acc = test_result
+        print(f"Saving teacher checkpoint @ epoch {i+1} because of best accuracy {best_acc:.2f}%")
         dump(teacher, open("teacher_checkpoint.pkl", "wb"))
 
 start_testing = time()
@@ -98,8 +99,13 @@ teacher = load(open("teacher_checkpoint.pkl", "rb"))
 student = MultiClassTsetlinMachine(**student_params)
 print(f"Initializing student with {student_params['number_of_clauses']} clauses from teacher")
 student.init_from_teacher(teacher, student_params['number_of_clauses'], X_train, Y_train)
+_, class_sums = teacher.predict_class_sums_2d(X_train)
 print(f"Generating soft labels from teacher with temperature {temperature}")
 soft_labels = teacher.get_soft_labels(X_train, temperature=temperature)
+
+
+#import pdb; pdb.set_trace()
+
 print("First 5 soft labels:")
 for i in range(5):
     label_row = soft_labels[i]

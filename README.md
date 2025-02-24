@@ -825,6 +825,51 @@ RMSD over 25 runs:
 #25 RMSD: 0.61 +/- 0.00 (1.02s)
 ```
 
+### Distillation Demo
+
+#### Code: Barebones Distillation Demo
+
+```python
+from pyTsetlinMachineParallel.tm import MultiClassTsetlinMachine
+from keras.datasets import mnist, fashion_mnist
+
+(X_train, Y_train), (X_test, Y_test) = mnist.load_data()
+
+X_train = np.where(X_train.reshape((X_train.shape[0], 28*28)) > 75, 1, 0) 
+X_test = np.where(X_test.reshape((X_test.shape[0], 28*28)) > 75, 1, 0) 
+
+teacher_params = {
+    "number_of_clauses": 1000,
+    "T": 5,
+    "s": 3,
+    "boost_true_positive_feedback": 1,
+    "number_of_state_bits": 8,
+    "append_negated": True,
+    "weighted_clauses": True
+}
+
+student_params = {
+    "number_of_clauses": 100,
+    "T": 5,
+    "s": 3,
+    "boost_true_positive_feedback": 1,
+    "number_of_state_bits": 8,
+    "append_negated": True,
+    "weighted_clauses": True
+}
+
+teacher = MultiClassTsetlinMachine(**teacher_params)
+teacher.fit(X_train, Y_train, epochs=20)
+
+student = MultiClassTsetlinMachine(**student_params)
+student.init_from_teacher(teacher, student_params['number_of_clauses'], X_train, Y_train)
+soft_labels = teacher.get_soft_labels(X_train, temperature=4)
+
+student.fit_soft(X_train, Y_train, soft_labels, epochs=30)
+```
+
+**See examples/distill.py for more detailed code.**
+
 ## Contributing
 
 There is a Docker container available for development purposes. To build the container, run the following command:

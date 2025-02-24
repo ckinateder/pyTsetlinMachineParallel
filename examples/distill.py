@@ -21,7 +21,7 @@ teacher_params = {
 }
 
 student_params = {
-    "number_of_clauses": 100,
+    "number_of_clauses": 400,
     "T": 5,
     "s": 3,
     "boost_true_positive_feedback": 1,
@@ -29,7 +29,7 @@ student_params = {
     "append_negated": True,
     "weighted_clauses": True
 }
-teacher_epochs = 20
+teacher_epochs = 30
 student_epochs = 40
 skip_train_result = True
 temperature = 4

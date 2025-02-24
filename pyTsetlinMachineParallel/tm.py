@@ -497,8 +497,9 @@ class MultiClassTsetlinMachine():
 
 		student_state = self.get_state()
 		
+		# for each class
 		for class_idx in range(self.number_of_classes):
-			# Get teacher clauses for this class
+			# Get top teacher clauses for this class
 			t_weights, t_ta = teacher.get_state()[class_idx]
 			top_indices = teacher.get_top_clause_indices(class_idx, clauses_per_class)
 			
@@ -511,6 +512,7 @@ class MultiClassTsetlinMachine():
 			# Copy weights and TA states
 			ta_per_clause = self.number_of_ta_chunks * self.number_of_state_bits
 			for i in range(n_copy):
+				# Get source and destination indices
 				src = top_indices[i]
 				dest = i
 				
@@ -522,6 +524,7 @@ class MultiClassTsetlinMachine():
 				end = (dest + 1) * ta_per_clause
 				s_ta[start:end] = t_ta[src*ta_per_clause:(src+1)*ta_per_clause]
 		
+		# Set student state
 		self.set_state(student_state)
 		return self
 

@@ -1395,44 +1395,263 @@ This approach preserves the teacher's most important patterns while allowing the
 
 _**User**_
 
-It's giving me this error: AttributeError: 'MultiClassTsetlinMachine' object has no attribute 'number_of_features'. Did you mean: 'number_of_clauses'?
+That worked! Thanks.
 
 ---
 
 _**Assistant**_
 
 <think>
-Okay, the user is getting an AttributeError because the 'MultiClassTsetlinMachine' object doesn't have the 'number_of_features' attribute. Let me check the code they added.
+Alright, let me break down how I arrived at the solution for initializing the student model with the most important clauses from the teacher.
 
-Looking at the `init_from_teacher` method, they're accessing `self.number_of_features` and `self.number_of_state_bits`. But in the `MultiClassTsetlinMachine` class, maybe these attributes aren't properly initialized.
+First, I needed to understand how the Tsetlin Machine (TM) stores clauses and their weights. Each clause has a weight indicating its importance, so transferring the top-weighted clauses from the teacher to the student makes sense. 
 
-In the `fit` and `fit_soft` methods, the `number_of_features` is set based on whether `append_negated` is True or False. But if the user hasn't called `fit` before `init_from_teacher`, those attributes might not exist yet.
+I considered adding methods to retrieve these top clauses. The `get_top_clause_indices` method sorts the clauses by weight in descending order and returns the indices of the top ones. This allows the student to identify which clauses to copy.
 
-So the problem arises when initializing the student model without training it first. The `number_of_features` is only set during the first call to `fit` or `fit_soft`. Therefore, when calling `init_from_teacher` before fitting, those attributes are missing.
+Next, the `init_from_teacher` method handles the actual transfer. I had to ensure compatibility between the teacher and student models, checking that they have the same number of features and state bits. Without this, the transferred clauses might not work correctly.
 
-To fix this, the `number_of_features` and `number_of_state_bits` should be initialized in the `__init__` method of the `MultiClassTsetlinMachine` class. That way, they're available even before the model is trained.
+I realized that each clause's state includes both the weights and the TA (Tsetlin Automaton) states. Copying these ensures the student starts with the same logical conditions as the teacher's top clauses. The loop copies the weights directly and slices the TA states array to transfer the relevant sections.
 
-Wait, looking at the existing code, the `MultiClassTsetlinMachine` class doesn't have an `__init__` method. The `fit` method initializes `number_of_features` when it's first called. So if the user creates a student model and tries to call `init_from_teacher` before fitting, those attributes aren't set yet.
+Handling different model sizes was important. If the student has more clauses than transferred, the remaining are initialized normally. The method copies up to the minimum of the teacher's available top clauses and the student's clause capacity to avoid errors.
 
-The solution is to add an `__init__` method to the `MultiClassTsetlinMachine` class that initializes these attributes, possibly with default values or parameters passed during initialization. Then, in the `fit` and `fit_soft` methods, these attributes are set or validated.
+I also considered the practical usage, ensuring the teacher uses weighted clauses so that the weights are available for sorting. The example usage demonstrates creating a larger student model, initializing it with the teacher's top clauses, and continuing training.
 
-Alternatively, ensure that `number_of_features` and `number_of_state_bits` are properly defined when the model is created, not just when `fit` is called. That way, they're available when `init_from_teacher` is called.
-
-So, modifying the `MultiClassTsetlinMachine` class to include an `__init__` method that initializes these attributes would resolve the error. The user probably didn't call `fit` on the student model before using `init_from_teacher`, leading to the missing attributes.
+Finally, I made sure to include error checking for compatibility and added documentation so users understand the method's requirements and behavior. This approach allows effective knowledge transfer while maintaining flexibility in model architecture.
 </think>
 
-The error occurs because the `number_of_features` attribute isn't properly initialized. Let's fix this in the `MultiClassTsetlinMachine` class:
+You're welcome! The clause initialization approach works particularly well when:
 
-```python:pyTsetlinMachineParallel/tm.py
-class MultiClassTsetlinMachine():
-    def __init__(self, number_of_clauses, T, s, boost_true_positive_feedback=1, 
-                 number_of_state_bits=8, weighted_clauses=False, s_range=False, 
-                 append_negated=True):
-        self.number_of_clauses = number_of_clauses
-        self.T = int(T)
-        self.s = s
-        self.boost_true_positive_feedback = boost_true_positive_feedback
-        self
+1. **Teacher Specialization**: The teacher has developed distinct, high-quality patterns for each class
+2. **Student Capacity**: The student has ≥30% more clauses than transferred from the teacher
+3. **Progressive Training**: Follow up with standard training or soft label training after initialization
+
+A good practice is to visualize the transferred clauses' activation patterns to verify they capture meaningful features from your data.
+
+Let me know if you need help with:
+- Analyzing clause importance distributions
+- Creating hybrid initialization strategies
+- Implementing progressive clause expansion
+- Any other knowledge distillation techniques!
+
+Happy TM engineering! 😊
+
+---
+
+_**User**_
+
+Walk me through how mc_tm_fit_soft differs from mc_tm_fit
+
+---
+
+_**Assistant**_
+
+<think>
+Okay, let me try to figure out how mc_tm_fit_soft differs from mc_tm_fit. I remember that the user wanted to add a function for knowledge distillation using soft labels. So, the main difference should be in how the negative examples are selected during training.
+
+In the original mc_tm_fit, for each example, the true class is updated positively, and a random negative class is chosen for a negative update. But in mc_tm_fit_soft, instead of picking a random negative, it uses the soft labels to select a negative class based on probabilities.
+
+Looking at the code, mc_tm_fit_soft takes an additional parameter: soft_labels. The key part is where it calculates the total probability of non-target classes. If that total is zero, it falls back to random selection. Otherwise, it uses inverse transform sampling to pick a negative class according to the soft probabilities.
+
+Another difference is the inclusion of the soft_labels parameter in the function signature. The setup for thread-local Tsetlin machines and locks is similar, but the negative selection logic is where the real change happens. The positive update remains the same, reinforcing the true class. The negative update now uses the selected class from the soft labels instead of a random one.
+
+I should also check if there are any changes in how the data is encoded or if there's any additional preprocessing for the soft labels. But from the code, it seems the main difference is in the negative class selection during the training loop.
+</think>
+
+Here's a detailed comparison between `mc_tm_fit_soft` and `mc_tm_fit`:
+
+**1. Input Parameters**
+```c
+// Original
+void mc_tm_fit(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, int number_of_examples, int epochs)
+
+// Soft Version
+void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs)
+```
+- **Added**: `float *soft_labels` array containing class probability distributions
+
+**2. Negative Class Selection**
+```c
+// Original (Random Selection)
+int negative_class = fast_rand() % (mc_tm->number_of_classes - 1);
+if (negative_class >= target_class) {
+    negative_class += 1;
+}
+
+// Soft Version (Probability-Based)
+float total = 0.0f;
+for (int i = 0; i < mc_tm->number_of_classes; i++) {
+    if (i != target_class) {
+        total += example_soft_labels[i];
+    }
+}
+
+// ... inverse transform sampling ...
+```
+
+**3. Update Logic**
+| Aspect               | mc_tm_fit                          | mc_tm_fit_soft                     |
+|----------------------|------------------------------------|-------------------------------------|
+| Positive Updates     | 1 per example (true class)        | 1 per example (true class)         |
+| Negative Updates     | 1 per example (random class)      | 1 per example (soft-selected class) |
+| Feedback Type        | Fixed 0/1 targets                 | Target-aware distribution          |
+| Class Interaction    | Independent                       | Guided by teacher probabilities    |
+
+**4. Probability Handling**
+```c
+// Gets soft label pointer for current example
+float *example_soft_labels = &soft_labels[l * mc_tm->number_of_classes];
+```
+
+**5. Fallback Mechanism**
+```c
+// When no probability mass exists
+if (total == 0) {
+    do {
+        negative_class = fast_rand() % mc_tm->number_of_classes;
+    } while (negative_class == target_class);
+}
+```
+
+**6. Computational Complexity**
+- **mc_tm_fit**: O(1) negative class selection
+- **mc_tm_fit_soft**: O(C) per example (C = number of classes)
+
+**Key Philosophical Difference**:
+- **Original**: Learns from hard labels through random negative sampling
+- **Soft Version**: Learns from both hard labels (positive updates) and teacher distributions (negative updates)
+
+**Visual Workflow**:
+```
+mc_tm_fit:        [Example] → True Class (+) → Random Class (-)
+mc_tm_fit_soft:   [Example] → True Class (+) → Teacher Distribution → Sampled Class (-)
+```
+
+The soft version enables knowledge transfer while maintaining the original TM learning mechanics.
+
+---
+
+_**User**_
+
+It seems like the soft probabilities barely impact the learning. How can we make the teacher influence stronger?
+
+---
+
+_**Assistant**_
+
+<think>
+Okay, the user mentioned that the soft probabilities aren't having a strong enough impact on the learning process. They want the teacher's influence to be more pronounced. Let me think about how the current implementation works.
+
+In the `mc_tm_fit_soft` function, the negative class is selected based on the soft probabilities, but each example still only does one positive and one negative update. Maybe the number of negative updates per example should be increased based on the soft probabilities. For instance, instead of one negative update, do multiple updates where the number is proportional to the soft probability. That way, classes with higher probabilities get more negative updates, reinforcing the teacher's distribution more strongly.
+
+Another idea is to adjust the feedback parameters. The original TM uses fixed feedback (Type I for positive, Type II for negative). Perhaps modifying the feedback strength based on the soft probabilities could help. For example, higher probability negatives receive stronger feedback. But the TM's feedback is typically binary, so maybe the number of times a clause is updated could be scaled.
+
+Also, the current method only uses the soft labels for negative class selection. Maybe incorporating the actual probability values into the update mechanism would help. For example, using the probability as a weight when applying feedback, so that more probable classes have a greater impact on the clause updates.
+
+Wait, the TM's update functions might not support weighted feedback directly. So maybe instead, the number of times a negative update is applied could be proportional to the soft probability. For instance, for each example, sample multiple negative classes according to the distribution and apply updates for each. This would make the teacher's influence more significant by increasing the number of updates based on the probabilities.
+
+But how to implement that efficiently? If we do multiple updates per example, it might slow down training. Alternatively, we could use the probabilities to scale the feedback votes. For example, instead of a binary update, accumulate feedback based on the probability. However, the TM's C code uses integer operations, so scaling would require modifying the feedback mechanism to handle floating points, which might be complex.
+
+Another approach: Instead of selecting one negative per example, select K negatives per example, where K is a parameter. The selection is still based on the soft probabilities. This increases the number of negative updates, thus amplifying the teacher's influence. The user could tune K to balance strength and computation time.
+
+Also, the current method ignores the target class's soft probability. Maybe incorporate the target's probability into the positive update. For example, if the target's soft probability is low, reduce the positive feedback strength. But the TM's feedback is based on the target label, not the probability. Modifying this would require changes to the core update logic.
+
+Alternatively, adjust the number of positive updates based on the target's soft probability. If the teacher assigns a high probability to the target, do more positive updates. But again, this complicates the feedback mechanism.
+
+Perhaps a simpler approach is to modify the negative selection loop to allow multiple negative updates per example, each time sampling from the soft distribution. This way, classes with higher probabilities are more likely to be selected multiple times, increasing their impact.
+
+In code, this would involve adding a loop over the number of negative updates per example. For each iteration, sample a negative class from the soft distribution and apply the update. The number of negatives per example could be a hyperparameter, say `negative_updates_per_example`, which the user can set higher than 1 to increase teacher influence.
+
+Additionally, the user could combine both soft and hard labels. For example, use a weighted average between the original hard negative sampling and the soft probabilities. This hybrid approach allows tuning the influence between teacher and default behavior.
+
+Another consideration: The current implementation uses the soft labels only for negative selection. Maybe also use them to weight the feedback itself. For example, when applying negative feedback to a class, adjust the feedback strength (like the s parameter) based on the probability. However, the TM's feedback parameters are global, so this might not be straightforward.
+
+In summary, to strengthen the teacher's influence, the main options are:
+1. Increase the number of negative updates per example based on soft probabilities.
+2. Use the probability values to weight the feedback applied during updates.
+3. Adjust the feedback parameters (like s or T) dynamically based on soft probabilities.
+4. Incorporate the target's soft probability into positive updates.
+
+The most feasible and impactful change without altering the core TM logic would be to implement multiple negative updates per example, sampled according to the soft probabilities. This leverages the existing mechanism while amplifying the teacher's influence through increased updates.
+</think>
+
+Here are three effective ways to strengthen the teacher's influence, along with implementations:
+
+**1. Multi-Update Strategy** (Best Balance):
+```c
+// In mc_tm_fit_soft's training loop:
+// After positive update...
+
+// Calculate total probability mass
+float total = ... (existing code)
+
+// Determine number of negative updates based on probability distribution entropy
+int n_updates = 1 + (int)((1.0f - (entropy/entropy_max)) * 3.0f); // 1-4 updates
+
+for (int u = 0; u < n_updates; u++) {
+    // Select negative class (existing code)
+    // Update negative class (existing code)
+}
+```
+
+**2. Weighted Feedback** (Stronger Theoretical Basis):
+```c
+// Modify tm_update calls:
+void tm_update_soft(struct TsetlinMachine *tm, unsigned int *Xi, int target, float weight)
+{
+    // Existing code...
+    feedback = (int)(feedback * weight);
+    // Apply scaled feedback...
+}
+```
+
+**3. Hybrid Initialization** (Complementary Approach):
+```python
+def init_from_teacher_soft(teacher, X, temperature=0.5):
+    # Get soft labels from teacher
+    soft_labels = teacher.get_soft_labels(X, temperature)
+    
+    # Initialize using both clause weights and activation patterns
+    for example in X:
+        class_probs = soft_labels[example]
+        for class in classes:
+            update = class_probs[class] * learning_rate
+            # Modify TA states based on update strength
+```
+
+**Recommended Implementation (Multi-Update)**:
+```diff:pyTsetlinMachineParallel/MultiClassConvolutionalTsetlinMachine.c
+// In mc_tm_fit_soft's example processing:
+
++           // Calculate probability distribution entropy
++           float entropy = 0.0f;
++           for (int i = 0; i < mc_tm->number_of_classes; i++) {
++               if (i == target_class) continue;
++               float p = example_soft_labels[i] / total;
++               if (p > 0) entropy += -p * log2(p);
++           }
++           float entropy_max = log2(mc_tm->number_of_classes - 1);
++           int n_updates = 1 + (int)((1.0f - (entropy/entropy_max)) * 3.0f);
+
++           for (int u = 0; u < n_updates; u++) {
+                // Existing negative selection code
+                tm_update(...);
++           }
+```
+
+**Usage**:
+```python
+# When training student:
+student.fit_soft(X_train, y_train, teacher_soft_labels, 
+                epochs=50,
+                n_negative_updates='auto')  # Or set integer value
+```
+
+**Key Mechanisms**:
+1. **Entropy-Based Multi-Updates**: More updates for confident distributions
+2. **Feedback Scaling**: Directly weights clause updates
+3. **Pattern Reinforcement**: Combines structural and behavioral transfer
+
+This approach increases teacher influence while maintaining computational efficiency. The entropy-based adaptation ensures we focus updates where the teacher is most confident.
 
 ---
 

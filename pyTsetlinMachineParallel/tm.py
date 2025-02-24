@@ -473,6 +473,8 @@ class MultiClassTsetlinMachine():
 		Initialize student with top clauses from teacher
 		teacher: Trained MultiClassTsetlinMachine instance
 		clauses_per_class: Number of clauses to transfer per class
+
+		This really only works if the teacher is weighted.
 		"""
 		# Validate compatibility and initialize TM
 		if self.mc_tm == None:
@@ -490,6 +492,8 @@ class MultiClassTsetlinMachine():
 			raise ValueError("Student and teacher must have same number of features")
 		if self.number_of_state_bits != teacher.number_of_state_bits:
 			raise ValueError("Student and teacher must have same number of state bits")
+		if not teacher.weighted_clauses:
+			warnings.warn("Initializing from unweighted teacher - this is not recommended!")
 
 		student_state = self.get_state()
 		

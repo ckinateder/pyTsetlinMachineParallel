@@ -76,7 +76,7 @@ void tm_update_clauses(struct TsetlinMachine *tm, unsigned int *Xi, int class_su
 
 void tm_update(struct TsetlinMachine *tm, unsigned int *Xi, int target);
 
-int tm_score(struct TsetlinMachine *tm, unsigned int *Xi);
+int tm_score(struct TsetlinMachine *tm, unsigned int *Xi, int clamp);
 
 int tm_ta_state(struct TsetlinMachine *tm, int clause, int ta);
 

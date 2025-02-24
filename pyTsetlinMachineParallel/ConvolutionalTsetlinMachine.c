@@ -185,8 +185,11 @@ static inline void tm_dec(struct TsetlinMachine *tm, int clause, int chunk, unsi
 	} 
 }
 
-/* Sum up the votes for each class */
-static inline int sum_up_class_votes(struct TsetlinMachine *tm)
+/* Sum up the votes for each class 
+If clamp is 1, then the class sum is clamped between -T and T
+This should always be true unless you are crazy (or using soft labels)
+*/
+static inline int sum_up_class_votes(struct TsetlinMachine *tm, int clamp)
 {
 	int class_sum = 0;
 
@@ -201,8 +204,10 @@ static inline int sum_up_class_votes(struct TsetlinMachine *tm)
 		}	
 	}
 
-	class_sum = (class_sum > (tm->T)) ? (tm->T) : class_sum;
-	class_sum = (class_sum < -(tm->T)) ? -(tm->T) : class_sum;
+	if (clamp == 1) {
+		class_sum = (class_sum > (tm->T)) ? (tm->T) : class_sum;
+		class_sum = (class_sum < -(tm->T)) ? -(tm->T) : class_sum;
+	}
 
 	return class_sum;
 }
@@ -357,7 +362,7 @@ void tm_update(struct TsetlinMachine *tm, unsigned int *Xi, int target)
 	/*** Sum up Clause Votes ***/
 	/***************************/
 
-	int class_sum = sum_up_class_votes(tm);
+	int class_sum = sum_up_class_votes(tm, 1);
 
 	/*********************************/
 	/*** Train Individual Automata ***/
@@ -366,7 +371,11 @@ void tm_update(struct TsetlinMachine *tm, unsigned int *Xi, int target)
 	tm_update_clauses(tm, Xi, class_sum, target);
 }
 
-int tm_score(struct TsetlinMachine *tm, unsigned int *Xi) {
+/*
+If clamp is 1, then the class sum is clamped between -T and T
+This should always be true unless you are crazy (or using soft labels)
+*/
+int tm_score(struct TsetlinMachine *tm, unsigned int *Xi, int clamp) {
 	/*******************************/
 	/*** Calculate Clause Output ***/
 	/*******************************/
@@ -377,7 +386,7 @@ int tm_score(struct TsetlinMachine *tm, unsigned int *Xi) {
 	/*** Sum up Clause Votes ***/
 	/***************************/
 
-	return sum_up_class_votes(tm);
+	return sum_up_class_votes(tm, clamp);
 }
 
 int tm_ta_state(struct TsetlinMachine *tm, int clause, int ta)

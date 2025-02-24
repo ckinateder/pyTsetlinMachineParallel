@@ -361,8 +361,9 @@ class MultiClassTsetlinMachine():
 	
 	def get_soft_labels(self, X, temperature=1.0):
 		Y, class_sums = self.predict_class_sums_2d(X)
-		class_sums += abs(np.min(class_sums))
-		soft_labels =  np.exp(class_sums / temperature) / np.sum(np.exp(class_sums / temperature), axis=1, keepdims=True)
+		# for each row, divide by the absolute value of the max class sum for that row
+		class_sums_normalized = class_sums / np.max(np.abs(class_sums), axis=1, keepdims=True)
+		soft_labels =  np.exp(class_sums_normalized / temperature) / np.sum(np.exp(class_sums_normalized / temperature), axis=1, keepdims=True)
 		return soft_labels
 	
 	def get_output_probabilities(self, X):

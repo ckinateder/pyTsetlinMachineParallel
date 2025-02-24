@@ -23,6 +23,7 @@
 
 import numpy as np
 import ctypes as C
+import warnings
 import os
 
 this_dir, this_filename = os.path.split(__file__)
@@ -360,6 +361,7 @@ class MultiClassTsetlinMachine():
 	
 	def get_soft_labels(self, X, temperature=1.0):
 		Y, class_sums = self.predict_class_sums_2d(X)
+		class_sums += abs(np.min(class_sums))
 		soft_labels =  np.exp(class_sums / temperature) / np.sum(np.exp(class_sums / temperature), axis=1, keepdims=True)
 		return soft_labels
 	
@@ -460,6 +462,9 @@ class MultiClassTsetlinMachine():
 		Returns indices of top n_clauses for specified class
 		Ordered by clause weight descending
 		"""
+		if not self.weighted_clauses:
+			warnings.warn("Getting top clause indices for unweighted clauses is not recommended - they will all be 1!")
+		
 		clause_weights = self.get_state()[class_idx][0]
 		return np.argsort(-clause_weights)[:n_clauses]
 

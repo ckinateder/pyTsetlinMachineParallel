@@ -3,19 +3,34 @@ import numpy as np
 from time import time
 from pickle import dump, load
 
-from keras.datasets import mnist
+from keras.datasets import mnist, fashion_mnist
 
 (X_train, Y_train), (X_test, Y_test) = mnist.load_data()
 
 X_train = np.where(X_train.reshape((X_train.shape[0], 28*28)) > 75, 1, 0) 
 X_test = np.where(X_test.reshape((X_test.shape[0], 28*28)) > 75, 1, 0) 
 
-teacher_params = (200, 10, 5)
-student_params = (50, 10, 5)
+teacher_params = {
+    "number_of_clauses": 1000,
+    "T": 5,
+    "s": 3,
+    "boost_true_positive_feedback": 1,
+    "number_of_state_bits": 8,
+    "append_negated": True,
+    "weighted_clauses": True
+}
 
-teacher = MultiClassTsetlinMachine(*teacher_params)
-teacher_epochs = 5
-student_epochs = 10
+student_params = {
+    "number_of_clauses": 100,
+    "T": 5,
+    "s": 3,
+    "boost_true_positive_feedback": 1,
+    "number_of_state_bits": 8,
+    "append_negated": True,
+    "weighted_clauses": True
+}
+teacher_epochs = 20
+student_epochs = 40
 skip_train_result = True
 temperature = 4
 print(f"Teacher params: {teacher_params}")
@@ -41,7 +56,7 @@ def normal_train_step(model, X_train, Y_train, X_test, Y_test, skip_train_result
     return test_result, train_result, stop_training-start_training, stop_train_result-start_train_result, stop_testing-start_testing
 
 print(f"Training baseline student for {student_epochs} epochs")
-student = MultiClassTsetlinMachine(*student_params)
+student = MultiClassTsetlinMachine(**student_params)
 for i in range(student_epochs+teacher_epochs):
     test_result, train_result, train_time, train_result_time, test_time = normal_train_step(student, X_train, Y_train, X_test, Y_test, skip_train_result)
     if skip_train_result:
@@ -57,7 +72,7 @@ print(f"Baseline student accuracy: {test_result:.2f}% ({student_test_time:.2f}s)
 baseline_student_acc = test_result
 
 print(f"Training baseline teacher for {teacher_epochs} epochs")
-teacher = MultiClassTsetlinMachine(*teacher_params)
+teacher = MultiClassTsetlinMachine(**teacher_params)
 for i in range(teacher_epochs+student_epochs):
     test_result, train_result, train_time, train_result_time, test_time = normal_train_step(teacher, X_train, Y_train, X_test, Y_test, skip_train_result)
     if skip_train_result:
@@ -80,9 +95,9 @@ print(f"Loading teacher checkpoint @ epoch {teacher_epochs}")
 
 teacher = load(open("teacher_checkpoint.pkl", "rb"))
 
-student = MultiClassTsetlinMachine(*student_params)
-print(f"Initializing student with {student_params[0]} clauses from teacher")
-student.init_from_teacher(teacher, student_params[0], X_train, Y_train)
+student = MultiClassTsetlinMachine(**student_params)
+print(f"Initializing student with {student_params['number_of_clauses']} clauses from teacher")
+student.init_from_teacher(teacher, student_params['number_of_clauses'], X_train, Y_train)
 print(f"Generating soft labels from teacher with temperature {temperature}")
 soft_labels = teacher.get_soft_labels(X_train, temperature=temperature)
 print("First 5 soft labels:")

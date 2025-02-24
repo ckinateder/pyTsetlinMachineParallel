@@ -5,3 +5,4 @@ build
 *.pkl
 *.pyc
 *.so
+.specstory

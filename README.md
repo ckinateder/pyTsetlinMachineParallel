@@ -48,7 +48,7 @@ Documentation coming soon at https://pytsetlinmachineparallel.readthedocs.io/en/
 
 Convolutional Tsetlin Machine tutorial, https://github.com/cair/convolutional-tsetlin-machine-tutorial
 
-## Future Work
+## Future Work (READ ME!)
 
 This implementation is a work in progress. There are more things I plan to look at. Here is the current state:
 
@@ -78,11 +78,19 @@ student_params = {
 temperature = 4.0
 ```
 
+Important changes that were made:
+- `MultiClassTsetlinMachine.init_from_teacher` was added to initialize the student from a teacher model
+- `mc_tm_fit_soft` was added to support soft labels for distillation for picking the negative examples
+- `MultiClassTsetlinMachine.fit_soft` was added to support soft labels for distillation for the teacher
+- `mc_tm_predict_with_class_sums_2d` was modified to remove the clamping of the class sums
+
 Things to revist:
 - [ ] `MultiClassTsetlinMachine.init_from_teacher`
   - [ ] Ensure that all the correct clauses are being transferred
-- [ ] `MultiClassTsetlinMachine.fit_soft`
+- [ ] `MultiClassTsetlinMachine.fit_soft` and `mc_tm_fit_soft`
   - [ ] Ensure that the soft labels are being generated correctly (no zeros or overflows)
+  - [ ] Play around with the temperature parameter
+  - [ ] Vary T for the teacher and student
 
 ## Examples
 

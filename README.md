@@ -82,7 +82,7 @@ Things to revist:
 - [ ] `MultiClassTsetlinMachine.init_from_teacher`
   - [ ] Ensure that all the correct clauses are being transferred
 - [ ] `MultiClassTsetlinMachine.fit_soft`
-  - [ ] Ensure that the soft labels are being generated correctly (no zeros or overflows) (recall that a higher threshold means there will be more variation in the soft labels due to clipping)
+  - [ ] Ensure that the soft labels are being generated correctly (no zeros or overflows)
 
 ## Examples
 

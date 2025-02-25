@@ -3,15 +3,14 @@ import numpy as np
 from time import time
 from pickle import dump, load
 
-from datasets import MNISTDataset, FashionMNISTDataset, KMNISTDataset, IMDBDataset
+from datasets import MNISTDataset, FashionMNISTDataset, KMNISTDataset, IMDBDataset,EMNISTLettersDataset
 
 dataset = MNISTDataset()
 X_train, Y_train, X_test, Y_test = dataset.get_data()
 
-
 teacher_params = {
     "number_of_clauses": 1000,
-    "T": 10,
+    "T": 80,
     "s": 4.0,
     "boost_true_positive_feedback": 1,
     "number_of_state_bits": 8,
@@ -28,10 +27,10 @@ student_params = {
     "append_negated": True,
     "weighted_clauses": True
 }
-teacher_epochs = 10
-student_epochs = 20
+teacher_epochs = 20
+student_epochs = 40
 skip_train_result = True
-temperature = 4
+temperature = 2
 print(f"Teacher params: {teacher_params}")
 print(f"Student params: {student_params}")
 

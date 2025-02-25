@@ -7,7 +7,7 @@ from typing import Union, Tuple
 import h5py
 import os
 from abc import ABC, abstractmethod
-from torchvision.datasets import KMNIST
+from torchvision.datasets import KMNIST, EMNIST
 from torchvision import transforms
 
 def prepare_imdb_data(
@@ -159,7 +159,26 @@ class MNISTDataset(Dataset):
 
         self.X_train = self.X_train.reshape(self.X_train.shape[0], 28*28)
         self.X_test = self.X_test.reshape(self.X_test.shape[0], 28*28)
-        
+
+class EMNISTLettersDataset(Dataset):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def _load(self, booleanize_threshold: int = 75):
+        train = EMNIST(root="data", split="letters", download=True, train=True, transform=transforms.ToTensor())
+        test = EMNIST(root="data", split="letters", download=True, train=False, transform=transforms.ToTensor())
+
+        self.X_train, self.Y_train = train.data.numpy(), train.targets.numpy()
+        self.X_test, self.Y_test = test.data.numpy(), test.targets.numpy()
+
+        self.X_train = np.where(self.X_train > booleanize_threshold, 1, 0)
+        self.X_test = np.where(self.X_test > booleanize_threshold, 1, 0)
+
+        # flatten each image using numpy
+        self.X_train = self.X_train.reshape(self.X_train.shape[0], 28*28)
+        self.X_test = self.X_test.reshape(self.X_test.shape[0], 28*28)
+
+
 class FashionMNISTDataset(Dataset):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

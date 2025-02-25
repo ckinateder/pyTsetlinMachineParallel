@@ -83,6 +83,7 @@ Important changes that were made:
 - `mc_tm_fit_soft` was added to support soft labels for distillation for picking the negative examples
 - `MultiClassTsetlinMachine.fit_soft` was added to support soft labels for distillation for the teacher
 - `mc_tm_predict_with_class_sums_2d` was modified to remove the clamping of the class sums
+- Added activation maps
 
 Things to revist:
 - [ ] `MultiClassTsetlinMachine.init_from_teacher`
@@ -95,6 +96,57 @@ Things to revist:
 ## Examples
 
 ### Multiclass Demo
+
+### Distillation Demo
+
+#### Code: Barebones Distillation Demo
+
+```python
+from pyTsetlinMachineParallel.tm import MultiClassTsetlinMachine
+from keras.datasets import mnist, fashion_mnist
+
+(X_train, Y_train), (X_test, Y_test) = mnist.load_data()
+
+X_train = np.where(X_train.reshape((X_train.shape[0], 28*28)) > 75, 1, 0) 
+X_test = np.where(X_test.reshape((X_test.shape[0], 28*28)) > 75, 1, 0) 
+
+teacher_params = {
+    "number_of_clauses": 1000,
+    "T": 5,
+    "s": 3,
+    "boost_true_positive_feedback": 1,
+    "number_of_state_bits": 8,
+    "append_negated": True,
+    "weighted_clauses": True
+}
+
+student_params = {
+    "number_of_clauses": 100,
+    "T": 5,
+    "s": 3,
+    "boost_true_positive_feedback": 1,
+    "number_of_state_bits": 8,
+    "append_negated": True,
+    "weighted_clauses": True
+}
+
+teacher = MultiClassTsetlinMachine(**teacher_params)
+teacher.fit(X_train, Y_train, epochs=20)
+
+student = MultiClassTsetlinMachine(**student_params)
+student.init_from_teacher(teacher, student_params['number_of_clauses'], X_train, Y_train)
+soft_labels = teacher.get_soft_labels(X_train, temperature=4)
+
+student.fit_soft(X_train, Y_train, soft_labels, epochs=30)
+```
+
+**See examples/distill.py for more detailed code.**
+
+#### Activation Maps
+
+See `examples/ActivationMaps.py` for the code that generated the activation maps below.
+
+![Activation Maps](./images/mnist_feature_importance_class_3.png)
 
 #### Code: NoisyXORDemo.py
 
@@ -868,51 +920,6 @@ RMSD over 25 runs:
 #24 RMSD: 0.61 +/- 0.00 (1.06s)
 #25 RMSD: 0.61 +/- 0.00 (1.02s)
 ```
-
-### Distillation Demo
-
-#### Code: Barebones Distillation Demo
-
-```python
-from pyTsetlinMachineParallel.tm import MultiClassTsetlinMachine
-from keras.datasets import mnist, fashion_mnist
-
-(X_train, Y_train), (X_test, Y_test) = mnist.load_data()
-
-X_train = np.where(X_train.reshape((X_train.shape[0], 28*28)) > 75, 1, 0) 
-X_test = np.where(X_test.reshape((X_test.shape[0], 28*28)) > 75, 1, 0) 
-
-teacher_params = {
-    "number_of_clauses": 1000,
-    "T": 5,
-    "s": 3,
-    "boost_true_positive_feedback": 1,
-    "number_of_state_bits": 8,
-    "append_negated": True,
-    "weighted_clauses": True
-}
-
-student_params = {
-    "number_of_clauses": 100,
-    "T": 5,
-    "s": 3,
-    "boost_true_positive_feedback": 1,
-    "number_of_state_bits": 8,
-    "append_negated": True,
-    "weighted_clauses": True
-}
-
-teacher = MultiClassTsetlinMachine(**teacher_params)
-teacher.fit(X_train, Y_train, epochs=20)
-
-student = MultiClassTsetlinMachine(**student_params)
-student.init_from_teacher(teacher, student_params['number_of_clauses'], X_train, Y_train)
-soft_labels = teacher.get_soft_labels(X_train, temperature=4)
-
-student.fit_soft(X_train, Y_train, soft_labels, epochs=30)
-```
-
-**See examples/distill.py for more detailed code.**
 
 ## Contributing
 

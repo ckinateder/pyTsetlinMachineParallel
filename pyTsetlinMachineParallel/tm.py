@@ -537,6 +537,133 @@ class MultiClassTsetlinMachine():
 		self.set_state(student_state)
 		return self
 
+	def get_activation_map(self, X_instance, class_idx=None, image_shape=None):
+		"""
+		Generates an activation map showing which literals are important for classification.
+		
+		Parameters:
+		-----------
+		X_instance: array-like
+			The input instance as a 1D array of binary values.
+		class_idx: int, optional
+			The class index to visualize. If None, the predicted class is used.
+		image_shape: tuple, optional
+			The shape of the original image (height, width). If None, assumes square image.
+			
+		Returns:
+		--------
+		activation_map: numpy.ndarray
+			A 3-channel image where:
+			- Green pixels: Original features (black pixels) important for classification
+			- Red pixels: Negated features (white pixels) important for classification
+			- White pixels: Features not used in classification
+		"""
+		# Reshape X_instance if necessary
+		X_instance = np.asarray(X_instance).flatten()
+		
+		# If class_idx is not provided, predict the class
+		if class_idx is None:
+			X_reshaped = X_instance.reshape(1, -1)
+			class_idx = self.predict(X_reshaped)[0]
+		
+		# Determine image shape
+		if image_shape is None:
+			if self.append_negated:
+				img_size = self.number_of_features // 2
+			else:
+				img_size = self.number_of_features
+			height = width = int(np.sqrt(img_size))
+			image_shape = (height, width)
+		else:
+			height, width = image_shape
+		
+		# Calculate feature count
+		feature_count = height * width
+		
+		# Get the encoded input to determine which clauses are active
+		encoded_input = self.encode(X_instance.reshape(1, -1))
+		
+		# Initialize arrays to track feature importance
+		pos_feature_importance = np.zeros(feature_count, dtype=np.float32)
+		neg_feature_importance = np.zeros(feature_count, dtype=np.float32) if self.append_negated else np.zeros(0)
+		
+		# For each clause in this class
+		for clause_idx in range(self.number_of_clauses):
+			# Get the clause configuration (which literals it includes)
+			clause_config = np.zeros(self.number_of_features, dtype=np.uint32)
+			_lib.mc_tm_clause_configuration(self.mc_tm, class_idx, clause_idx, clause_config)
+			
+			# Get the clause weight (importance)
+			clause_weight = 1.0
+			if self.weighted_clauses:
+				clause_weight = float(_lib.mc_tm_clause_weight(self.mc_tm, class_idx, clause_idx))
+			
+			# Only consider clauses that match the input (are active)
+			if self._clause_matches_input(clause_config, encoded_input, feature_count):
+				# Split configuration into positive and negative literals
+				if self.append_negated:
+					# Add weights to feature importance
+					pos_feature_importance += clause_weight * clause_config[:feature_count]
+					neg_feature_importance += clause_weight * clause_config[feature_count:2*feature_count]
+				else:
+					pos_feature_importance += clause_weight * clause_config
+		
+		# Normalize the importance values
+		max_pos = np.max(pos_feature_importance) if np.max(pos_feature_importance) > 0 else 1
+		max_neg = np.max(neg_feature_importance) if len(neg_feature_importance) > 0 and np.max(neg_feature_importance) > 0 else 1
+		
+		pos_feature_importance = pos_feature_importance / max_pos
+		neg_feature_importance = neg_feature_importance / max_neg if len(neg_feature_importance) > 0 else np.zeros_like(pos_feature_importance)
+		
+		# Create the activation map (RGB image)
+		activation_map = np.ones((*image_shape, 3))  # White background
+		
+		# Fill in the activation map with color intensities
+		for i in range(height):
+			for j in range(width):
+				pixel_idx = i * width + j
+				
+				if pixel_idx < feature_count:
+					# Positive literals (original features)
+					if pos_feature_importance[pixel_idx] > 0:
+						intensity = pos_feature_importance[pixel_idx]
+						activation_map[i, j] = [1.0 - intensity, 1.0, 1.0 - intensity]  # Green
+					
+					# Negated literals
+					if len(neg_feature_importance) > pixel_idx and neg_feature_importance[pixel_idx] > 0:
+						intensity = neg_feature_importance[pixel_idx]
+						activation_map[i, j] = [1.0, 1.0 - intensity, 1.0 - intensity]  # Red
+		
+		return activation_map
+
+	def _clause_matches_input(self, clause_config, encoded_input, feature_count):
+		"""Check if a clause matches/activates for the given input"""
+		# A clause matches if all included literals match the input
+		if self.append_negated:
+			for i in range(feature_count):
+				# Check positive literals
+				if clause_config[i] == 1:  # This literal is included
+					chunk_idx = i // 32
+					bit_idx = i % 32
+					if chunk_idx < len(encoded_input) and (encoded_input[chunk_idx] & (1 << bit_idx)) == 0:
+						return False  # Literal doesn't match input
+					
+				# Check negative literals
+				if clause_config[i + feature_count] == 1:  # Negated literal is included
+					chunk_idx = i // 32
+					bit_idx = i % 32
+					if chunk_idx < len(encoded_input) and (encoded_input[chunk_idx] & (1 << bit_idx)) != 0:
+						return False  # Negated literal doesn't match input
+		else:
+			for i in range(feature_count):
+				if clause_config[i] == 1:  # This literal is included
+					chunk_idx = i // 32
+					bit_idx = i % 32
+					if chunk_idx < len(encoded_input) and (encoded_input[chunk_idx] & (1 << bit_idx)) == 0:
+						return False  # Literal doesn't match input
+					
+		return True  # All included literals match
+
 class RegressionTsetlinMachine():
 	def __init__(self, number_of_clauses, T, s, boost_true_positive_feedback=1, number_of_state_bits=8, weighted_clauses=False, s_range=False):
 		self.number_of_clauses = number_of_clauses

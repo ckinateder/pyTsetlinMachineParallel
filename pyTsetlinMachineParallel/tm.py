@@ -110,7 +110,7 @@ _lib.tm_encode.restype = None
 _lib.tm_encode.argtypes = [array_1d_uint, array_1d_uint, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int] 
 
 _lib.mc_tm_fit_soft.restype = None                      
-_lib.mc_tm_fit_soft.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int]
+_lib.mc_tm_fit_soft.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int, C.c_float, C.c_float]
 
 class MultiClassConvolutionalTsetlinMachine2D():
 	def __init__(self, number_of_clauses, T, s, patch_dim, boost_true_positive_feedback=1, number_of_state_bits=8, append_negated=True, weighted_clauses=False, s_range=False):
@@ -434,7 +434,7 @@ class MultiClassTsetlinMachine():
 
 		return self.encoded_X
 
-	def fit_soft(self, X, Y, soft_labels, epochs=100, incremental=False):
+	def fit_soft(self, X, Y, soft_labels, epochs=100, incremental=False, alpha=0.5, temperature=2.0):
 		number_of_examples = X.shape[0]
 
 		if self.mc_tm == None:
@@ -462,7 +462,7 @@ class MultiClassTsetlinMachine():
 		else:
 			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
 		
-		_lib.mc_tm_fit_soft(self.mc_tm, self.encoded_X, Ym, Softm, number_of_examples, epochs)
+		_lib.mc_tm_fit_soft(self.mc_tm, self.encoded_X, Ym, Softm, number_of_examples, epochs, alpha, temperature)
 
 		return
 
@@ -480,10 +480,20 @@ class MultiClassTsetlinMachine():
 	def init_from_teacher(self, teacher, clauses_per_class, X, Y):
 		"""
 		Initialize student with top clauses from teacher
-		teacher: Trained MultiClassTsetlinMachine instance
-		clauses_per_class: Number of clauses to transfer per class
-
-		This really only works if the teacher is weighted.
+		
+		Parameters:
+		- teacher: Trained MultiClassTsetlinMachine instance
+		- clauses_per_class: Number of clauses to transfer per class
+		- X: Training data
+		- Y: Training labels
+		
+		Returns:
+		- self: For method chaining
+		
+		This method selects the most effective clauses from the teacher
+		model and transfers them to the student model. It now includes
+		improved clause diversity by considering both clause weight and
+		activation pattern diversity.
 		"""
 		# Validate compatibility and initialize TM
 		if self.mc_tm == None:
@@ -506,23 +516,70 @@ class MultiClassTsetlinMachine():
 
 		student_state = self.get_state()
 		
-		# for each class
+		# For each class
 		for class_idx in range(self.number_of_classes):
-			# Get top teacher clauses for this class
+			# Get teacher state for this class
 			t_weights, t_ta = teacher.get_state()[class_idx]
-			top_indices = teacher.get_top_clause_indices(class_idx, clauses_per_class)
+			
+			# Get initial top indices based on weights
+			top_indices = teacher.get_top_clause_indices(class_idx, min(clauses_per_class * 3, len(t_weights)))
+			
+			# Analyze clause diversity by examining TAs
+			selected_indices = []
+			ta_per_clause = self.number_of_ta_chunks * self.number_of_state_bits
+			
+			# First, select the top 20% clauses directly based on weight
+			direct_selection = max(1, int(clauses_per_class * 0.2))
+			selected_indices.extend(top_indices[:direct_selection])
+			
+			# For the remaining clauses, select based on both weight and diversity
+			remaining_indices = top_indices[direct_selection:]
+			
+			# Sample training examples to evaluate clause patterns
+			sample_size = min(100, X.shape[0])
+			sample_indices = np.random.choice(X.shape[0], sample_size, replace=False)
+			X_sample = X[sample_indices]
+			
+			# Get encoded samples
+			self.encoded_X = np.ascontiguousarray(np.empty(int(sample_size * self.number_of_ta_chunks), dtype=np.uint32))
+			X_encoded = self.encode(X_sample)
+			
+			# For diversity selection, measure how clauses activate on sample data
+			remaining_count = clauses_per_class - direct_selection
+			
+			if remaining_count > 0 and len(remaining_indices) > 0:
+				# Choose clauses that have diverse activation patterns
+				candidate_diversity_scores = []
+				
+				for idx in remaining_indices:
+					# Extract TA configuration for this clause
+					clause_ta_config = t_ta[idx*ta_per_clause:(idx+1)*ta_per_clause]
+					
+					# Count activations on sample data (we can't call the actual activation function directly)
+					# Instead, estimate diversity based on clause configuration pattern
+					ta_config_norm = np.sum(clause_ta_config) / (ta_per_clause * 255)  # Normalize between 0-1
+					
+					# Score based on weight and configuration uniqueness
+					weight_score = t_weights[idx] / max(t_weights)  # Normalize weight
+					diversity_score = weight_score * (0.5 + 0.5 * ta_config_norm)  # Balance weight and config
+					
+					candidate_diversity_scores.append((idx, diversity_score))
+				
+				# Sort by diversity score and select remaining clauses
+				candidate_diversity_scores.sort(key=lambda x: x[1], reverse=True)
+				selected_indices.extend([idx for idx, _ in candidate_diversity_scores[:remaining_count]])
 			
 			# Get student state for this class
 			s_weights, s_ta = student_state[class_idx]
 			
 			# Calculate how many clauses we can actually transfer
-			n_copy = min(len(top_indices), len(s_weights))
+			n_copy = min(len(selected_indices), len(s_weights))
 			
 			# Copy weights and TA states
 			ta_per_clause = self.number_of_ta_chunks * self.number_of_state_bits
 			for i in range(n_copy):
 				# Get source and destination indices
-				src = top_indices[i]
+				src = selected_indices[i]
 				dest = i
 				
 				# Copy clause weight

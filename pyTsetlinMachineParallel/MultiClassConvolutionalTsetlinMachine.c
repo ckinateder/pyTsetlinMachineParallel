@@ -396,7 +396,23 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
 }
 
 // Add new function for soft label training
-void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs)
+/*
+ * This function implements knowledge distillation for Tsetlin Machines using soft labels.
+ * 
+ * Parameters:
+ * - mc_tm: Pointer to the multi-class Tsetlin Machine to be trained
+ * - X: Input data
+ * - y: True class labels
+ * - soft_labels: Probability distribution from teacher model (already temperature-scaled)
+ * - number_of_examples: Number of training examples
+ * - epochs: Number of training epochs
+ * - alpha: Balance between hard and soft labels (0.0 = all soft, 1.0 = all hard)
+ * - temperature: Controls additional temperature scaling for training dynamics
+ *   - Higher values make the system more sensitive to teacher confidences
+ *   - A temperature around 2-4 works well for most cases
+ *   - This parameter is used to sharpen/soften the teacher's probability distribution
+ */
+void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs, float alpha, float temperature)
 {
     /*------------------------------------------------------------*/
     /* Initialization and Setup                                   */
@@ -466,7 +482,7 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
     }
 
     /*------------------------------------------------------------*/
-    /* Main Training Loop                                          */
+    /* Main Training Loop                                         */
     /*------------------------------------------------------------*/
     for (int epoch = 0; epoch < epochs; epoch++) {
         // Process examples in parallel using OpenMP
@@ -479,75 +495,69 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
             // Get true class label for this example
             int target_class = y[l];
             
-            // Pointer to soft label probabilities (num_classes elements)
-            float *example_soft_labels = &soft_labels[l * mc_tm->number_of_classes];
+            // Copy soft labels and normalize if needed
+            float scaled_probs[mc_tm->number_of_classes];
+            float sum = 0.0;
+            
+            // Apply temperature adjustment and calculate sum for normalization
+            // This secondary scaling controls how probabilities influence feedback
+            for (int i = 0; i < mc_tm->number_of_classes; i++) {
+                // Use input temperature to control the final distribution softness
+                // Higher temperature in Python gives softer initial probs, but we sharpen them here
+                scaled_probs[i] = powf(soft_labels[l * mc_tm->number_of_classes + i], 1.0/temperature);
+                sum += scaled_probs[i];
+            }
+            
+            // Normalize the probabilities
+            for (int i = 0; i < mc_tm->number_of_classes; i++) {
+                scaled_probs[i] /= sum;
+            }
             
             /*----------------------------------------------------*/
-            /* Positive Class Update                             */
+            /* Hard Label (True Class) Training                   */
             /*----------------------------------------------------*/
-            // Always reinforce the true class with Type I feedback
-            tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], 
-                     &X[pos], 1);
-
-            /*----------------------------------------------------*/
-            /* Negative Class Selection - Improved                */
-            /*----------------------------------------------------*/
-            // Hybrid approach: balance between soft probabilities and randomness
-            float randomization_factor = 0.3f; // 30% random selection, 70% soft probabilities
-            float random_val = (float)fast_rand() / FAST_RAND_MAX;
+            // Apply Type I feedback to true class with probability based on alpha
+            if ((float)fast_rand() / FAST_RAND_MAX <= alpha) {
+                tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], 
+                         &X[pos], 1);
+            }
             
-            int negative_class = -1; // Initialize with invalid value
-            
-            if (random_val < randomization_factor) {
-                // Use uniform random selection (like original algorithm)
-                do {
-                    negative_class = fast_rand() % mc_tm->number_of_classes;
-                } while (negative_class == target_class);
-            } else {
-                // Calculate total probability mass for negative classes
-                float total = 0.0f;
-                for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                    if (i != target_class) {
-                        total += example_soft_labels[i];
-                    }
+            /*----------------------------------------------------*/
+            /* Soft Label Training for All Classes                */
+            /*----------------------------------------------------*/
+            // Process all classes using soft labels
+            for (int i = 0; i < mc_tm->number_of_classes; i++) {
+                // Skip true class if already trained with hard labels
+                if (i == target_class && alpha > 0.0) continue;
+                
+                // Calculate base feedback probability based on soft label
+                float feedback_prob = (1.0 - alpha) * scaled_probs[i];
+                
+                // No training if probability is too small
+                if (feedback_prob < 0.001) continue;
+                
+                // Determine if we should give positive or negative feedback
+                // For high probabilities from teacher, train with positive feedback (1)
+                // For low probabilities, train with negative feedback (0)
+                int feedback_type = 0;
+                if (scaled_probs[i] > 0.5) {
+                    feedback_type = 1;
+                    // Strengthen positive feedback based on teacher confidence
+                    // Higher temperature makes this more aggressive
+                    feedback_prob = feedback_prob * (1.0 + scaled_probs[i] * temperature);
+                } else {
+                    feedback_type = 0;
+                    // Strengthen negative feedback based on teacher confidence
+                    // Higher temperature makes this more aggressive
+                    feedback_prob = feedback_prob * (1.0 + (1.0 - scaled_probs[i]) * temperature);
                 }
                 
-                if (total <= 0.0001f) { // Effectively zero
-                    // Fallback to random when probabilities are too small
-                    do {
-                        negative_class = fast_rand() % mc_tm->number_of_classes;
-                    } while (negative_class == target_class);
-                } else {
-                    // Proportional sampling using inverse transform method
-                    float threshold = (float)fast_rand() / FAST_RAND_MAX * total;
-                    float cumulative = 0.0f;
-                    
-                    // Find first class where cumulative probability >= threshold
-                    for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                        if (i == target_class) continue;
-                        
-                        cumulative += example_soft_labels[i];
-                        if (cumulative >= threshold) {
-                            negative_class = i;
-                            break;
-                        }
-                    }
-                    
-                    // Safety check - if we somehow didn't select a class
-                    if (negative_class == -1) {
-                        do {
-                            negative_class = fast_rand() % mc_tm->number_of_classes;
-                        } while (negative_class == target_class);
-                    }
+                // Apply feedback with probability proportional to soft label strength
+                if ((float)fast_rand() / FAST_RAND_MAX <= feedback_prob) {
+                    tm_update(mc_tm_thread[thread_id]->tsetlin_machines[i], 
+                             &X[pos], feedback_type);
                 }
             }
-
-            /*----------------------------------------------------*/
-            /* Negative Class Update                             */
-            /*----------------------------------------------------*/
-            // Apply Type II feedback to selected negative class
-            tm_update(mc_tm_thread[thread_id]->tsetlin_machines[negative_class], 
-                     &X[pos], 0);
         }
     }
 

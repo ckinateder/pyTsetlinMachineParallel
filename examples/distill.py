@@ -5,13 +5,13 @@ from pickle import dump, load
 
 from datasets import MNISTDataset, FashionMNISTDataset, KMNISTDataset, IMDBDataset,EMNISTLettersDataset
 
-dataset = MNISTDataset()
+dataset = KMNISTDataset()
 X_train, Y_train, X_test, Y_test = dataset.get_data()
 
 teacher_params = {
     "number_of_clauses": 1000,
-    "T": 80,
-    "s": 4.0,
+    "T": 100,
+    "s": 8.2,
     "boost_true_positive_feedback": 1,
     "number_of_state_bits": 8,
     "append_negated": True,
@@ -20,15 +20,15 @@ teacher_params = {
 
 student_params = {
     "number_of_clauses": 100,
-    "T": 10,
-    "s": 4.0,
+    "T": 100,
+    "s": 8.2,
     "boost_true_positive_feedback": 1,
     "number_of_state_bits": 8,
     "append_negated": True,
     "weighted_clauses": True
 }
 teacher_epochs = 20
-student_epochs = 40
+student_epochs = 30
 skip_train_result = True
 temperature = 2
 print(f"Teacher params: {teacher_params}")
@@ -95,9 +95,9 @@ print(f"Loading teacher checkpoint @ epoch {teacher_epochs}")
 
 teacher = load(open("teacher_checkpoint.pkl", "rb"))
 
-student = MultiClassTsetlinMachine(**student_params)
+distilled = MultiClassTsetlinMachine(**student_params)
 print(f"Initializing student with {student_params['number_of_clauses']} clauses from teacher")
-student.init_from_teacher(teacher, student_params['number_of_clauses'], X_train, Y_train)
+distilled.init_from_teacher(teacher, student_params['number_of_clauses'], X_train, Y_train)
 _, class_sums = teacher.predict_class_sums_2d(X_train)
 print(f"Generating soft labels from teacher with temperature {temperature}")
 soft_labels = teacher.get_soft_labels(X_train, temperature=temperature)
@@ -112,13 +112,14 @@ for i in range(5):
 
 print(f"Training student with soft labels")
 
+
 for i in range(teacher_epochs, teacher_epochs+student_epochs):
     start_training = time()
-    student.fit_soft(X_train, Y_train, soft_labels, epochs=1, incremental=True)
+    distilled.fit_soft(X_train, Y_train, soft_labels, epochs=1, incremental=True)
     stop_training = time()
     train_time = stop_training-start_training
     start_testing = time()
-    test_result = 100*(student.predict(X_test) == Y_test).mean()
+    test_result = 100*(distilled.predict(X_test) == Y_test).mean()
     stop_testing = time()
     test_result_time = stop_testing-start_testing
 
@@ -127,7 +128,7 @@ for i in range(teacher_epochs, teacher_epochs+student_epochs):
         print("#%02d Training: %.2fs || Accuracy (test) (%.2fs): %.2f%%" % (i+1, train_time, test_time, test_result))
     else:
         start_train_result = time()
-        train_result = 100*(student.predict(X_train) == Y_train).mean()
+        train_result = 100*(distilled.predict(X_train) == Y_train).mean()
         stop_train_result = time()
         train_result_time = stop_train_result-start_train_result
 
@@ -135,12 +136,17 @@ for i in range(teacher_epochs, teacher_epochs+student_epochs):
 
 
 start_testing = time()
-test_result = 100*(student.predict(X_test) == Y_test).mean()
+test_result = 100*(distilled.predict(X_test) == Y_test).mean()
 stop_testing = time()
 distilled_test_time = stop_testing-start_testing
 distilled_student_acc = test_result
 
 print(f"Distilled student accuracy: {distilled_student_acc:.2f}% ({distilled_test_time:.2f}s)")
+
+# generate activation maps
+from ActivationMaps import visualize_activation_maps
+
+visualize_activation_maps(teacher, student, distilled, X_test[0], (28, 28), "activation_map.png")
 
 # now compare all accuracies and times
 print("--------------------------------")

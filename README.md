@@ -78,6 +78,14 @@ student_params = {
 temperature = 4.0
 ```
 
+Some parameters for a starting point:
+
+| Dataset | $C_T$ | $T_T$ | $s_T$ | $C_S$ | $T_S$ | $s_S$ | Temperature | Epochs Teacher | Epochs Student |
+|---------|-------|-------|-------|-------|-------|-------|-------------|----------------|----------------|
+| MNIST   | 1000  | 100   | 7     | 100   | 100   | 7     | 4.0         | 20             | 30             |
+| KMNIST  | 1000  | 100   | 8.2   | 100   | 100   | 8.2   | 2.0         | 20             | 30             |
+
+
 Important changes that were made:
 - `MultiClassTsetlinMachine.init_from_teacher` was added to initialize the student from a teacher model
 - `mc_tm_fit_soft` was added to support soft labels for distillation for picking the negative examples

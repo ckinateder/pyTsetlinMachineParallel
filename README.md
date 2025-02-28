@@ -83,7 +83,7 @@ Some parameters for a starting point:
 | Dataset | $C_T$ | $T_T$ | $s_T$ | $C_S$ | $T_S$ | $s_S$ | Temperature | Epochs Teacher | Epochs Student |
 |---------|-------|-------|-------|-------|-------|-------|-------------|----------------|----------------|
 | MNIST   | 1000  | 100   | 7     | 100   | 100   | 7     | 4.0         | 20             | 30             |
-| KMNIST  | 1000  | 100   | 8.2   | 100   | 100   | 8.2   | 2.0         | 20             | 30             |
+| KMNIST  | 1000  | 100   | 8.6   | 100   | 100   | 8.6   | 4.0         | 20             | 30             |
 
 
 Important changes that were made:

@@ -550,7 +550,8 @@ class MultiClassTsetlinMachine():
 			
 			# For diversity selection, measure how clauses activate on sample data
 			remaining_count = clauses_per_class - direct_selection
-			
+			config_norms = []
+
 			if remaining_count > 0 and len(remaining_indices) > 0:
 				# Choose clauses that have diverse activation patterns
 				candidate_diversity_scores = []
@@ -568,7 +569,7 @@ class MultiClassTsetlinMachine():
 
 					# Get a normalized score between 0 and 1
 					ta_config_norm = active_count / ta_per_clause  # Properly normalized between 0-1
-					
+					config_norms.append(ta_config_norm)
 					# Score based on weight and configuration uniqueness
 					weight_score = t_weights[idx] / max(t_weights)  # Normalize weight
 					diversity_score = weight_score * (0.5 + 0.5 * ta_config_norm)  # Balance weight and config

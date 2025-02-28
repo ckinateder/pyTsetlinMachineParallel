@@ -20,7 +20,7 @@ Y_test = Y_test[:int(len(Y_test)*trim)]
 teacher_params = {
     "number_of_clauses": 1000,
     "T": 100,
-    "s": 8.6,
+    "s": 8.2,
     "boost_true_positive_feedback": 1,
     "number_of_state_bits": 8,
     "append_negated": True,
@@ -30,7 +30,7 @@ teacher_params = {
 student_params = {
     "number_of_clauses": 100,
     "T": 100,
-    "s": 8.6,
+    "s": 8.2,
     "boost_true_positive_feedback": 1,
     "number_of_state_bits": 8,
     "append_negated": True,
@@ -38,8 +38,8 @@ student_params = {
 }
 
 # Training hyperparameters
-teacher_epochs = 25
-student_epochs = 50
+teacher_epochs = 20
+student_epochs = 30
 skip_train_result = True
 
 # Distillation hyperparameters

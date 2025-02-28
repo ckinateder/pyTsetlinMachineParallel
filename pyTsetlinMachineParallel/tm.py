@@ -110,7 +110,10 @@ _lib.tm_encode.restype = None
 _lib.tm_encode.argtypes = [array_1d_uint, array_1d_uint, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int] 
 
 _lib.mc_tm_fit_soft.restype = None                      
-_lib.mc_tm_fit_soft.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int, C.c_float, C.c_float]
+_lib.mc_tm_fit_soft.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int]
+
+_lib.mc_tm_fit_soft_improved.restype = None                      
+_lib.mc_tm_fit_soft_improved.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int, C.c_float, C.c_float]
 
 class MultiClassConvolutionalTsetlinMachine2D():
 	def __init__(self, number_of_clauses, T, s, patch_dim, boost_true_positive_feedback=1, number_of_state_bits=8, append_negated=True, weighted_clauses=False, s_range=False):
@@ -462,7 +465,7 @@ class MultiClassTsetlinMachine():
 		else:
 			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
 		
-		_lib.mc_tm_fit_soft(self.mc_tm, self.encoded_X, Ym, Softm, number_of_examples, epochs, alpha, temperature)
+		_lib.mc_tm_fit_soft_improved(self.mc_tm, self.encoded_X, Ym, Softm, number_of_examples, epochs, alpha, temperature)
 
 		return
 
@@ -477,7 +480,7 @@ class MultiClassTsetlinMachine():
 		clause_weights = self.get_state()[class_idx][0]
 		return np.argsort(-clause_weights)[:n_clauses]
 
-	def init_from_teacher(self, teacher, clauses_per_class, X, Y):
+	def init_from_teacher(self, teacher, clauses_per_class, X, Y, weight_portion:float=0.2):
 		"""
 		Initialize student with top clauses from teacher
 		
@@ -486,7 +489,7 @@ class MultiClassTsetlinMachine():
 		- clauses_per_class: Number of clauses to transfer per class
 		- X: Training data
 		- Y: Training labels
-		
+		- weight_portion: Portion of clauses to transfer based on weight
 		Returns:
 		- self: For method chaining
 		
@@ -513,6 +516,8 @@ class MultiClassTsetlinMachine():
 			raise ValueError("Student and teacher must have same number of state bits")
 		if not teacher.weighted_clauses:
 			warnings.warn("Initializing from unweighted teacher - this is not recommended!")
+		if weight_portion < 0 or weight_portion > 1:
+			raise ValueError("Weight portion must be between 0 and 1")
 
 		student_state = self.get_state()
 		
@@ -529,7 +534,7 @@ class MultiClassTsetlinMachine():
 			ta_per_clause = self.number_of_ta_chunks * self.number_of_state_bits
 			
 			# First, select the top 20% clauses directly based on weight
-			direct_selection = max(1, int(clauses_per_class * 0.2))
+			direct_selection = max(1, int(clauses_per_class * weight_portion))
 			selected_indices.extend(top_indices[:direct_selection])
 			
 			# For the remaining clauses, select based on both weight and diversity
@@ -542,7 +547,6 @@ class MultiClassTsetlinMachine():
 			
 			# Get encoded samples
 			self.encoded_X = np.ascontiguousarray(np.empty(int(sample_size * self.number_of_ta_chunks), dtype=np.uint32))
-			X_encoded = self.encode(X_sample)
 			
 			# For diversity selection, measure how clauses activate on sample data
 			remaining_count = clauses_per_class - direct_selection
@@ -554,10 +558,16 @@ class MultiClassTsetlinMachine():
 				for idx in remaining_indices:
 					# Extract TA configuration for this clause
 					clause_ta_config = t_ta[idx*ta_per_clause:(idx+1)*ta_per_clause]
-					
-					# Count activations on sample data (we can't call the actual activation function directly)
-					# Instead, estimate diversity based on clause configuration pattern
-					ta_config_norm = np.sum(clause_ta_config) / (ta_per_clause * 255)  # Normalize between 0-1
+
+					# Count activations on sample data
+					active_count = 0
+					for ta_idx in range(ta_per_clause):
+						ta_action = (clause_ta_config[ta_idx] & (1 << 31)) > 0  # Check if action bit is set
+						if ta_action:
+							active_count += 1
+
+					# Get a normalized score between 0 and 1
+					ta_config_norm = active_count / ta_per_clause  # Properly normalized between 0-1
 					
 					# Score based on weight and configuration uniqueness
 					weight_score = t_weights[idx] / max(t_weights)  # Normalize weight

@@ -3,7 +3,7 @@ import numpy as np
 from time import time
 from pickle import dump, load
 import os
-
+import json
 from datasets import MNISTDataset, FashionMNISTDataset, KMNISTDataset, IMDBDataset, EMNISTLettersDataset
 
 # Configuration
@@ -11,7 +11,7 @@ dataset = KMNISTDataset()
 X_train, Y_train, X_test, Y_test = dataset.get_data()
 
 # take a subset of the data
-trim = 12 # 0.5 = 50% of the data
+trim = 1 # 0.5 = 50% of the data
 X_train = X_train[:int(len(X_train)*trim)]
 Y_train = Y_train[:int(len(Y_train)*trim)]
 X_test = X_test[:int(len(X_test)*trim)]
@@ -20,7 +20,7 @@ Y_test = Y_test[:int(len(Y_test)*trim)]
 teacher_params = {
     "number_of_clauses": 1000,
     "T": 100,
-    "s": 8.2,
+    "s": 8.6,
     "boost_true_positive_feedback": 1,
     "number_of_state_bits": 8,
     "append_negated": True,
@@ -30,7 +30,7 @@ teacher_params = {
 student_params = {
     "number_of_clauses": 100,
     "T": 100,
-    "s": 8.2,
+    "s": 8.6,
     "boost_true_positive_feedback": 1,
     "number_of_state_bits": 8,
     "append_negated": True,
@@ -38,8 +38,8 @@ student_params = {
 }
 
 # Training hyperparameters
-teacher_epochs = 50
-student_epochs = 100
+teacher_epochs = 25
+student_epochs = 50
 skip_train_result = True
 
 # Distillation hyperparameters
@@ -200,14 +200,18 @@ results = {
         "distilled": distilled_test_time
     }
 }
-dump(results, open("results/distillation_results.json", "w"))
+# save results as json
+with open("results/distillation_results.json", "w") as f:
+    json.dump(results, f)
 
 # Generate activation maps
 try:
     from ActivationMaps import visualize_activation_maps
     print("Generating activation maps...")
-    visualize_activation_maps(teacher, student, distilled, X_test[0], (28, 28), "results/activation_map.png")
+    samples = np.random.randint(0, len(X_test), size=4)
+    visualize_activation_maps(teacher, student, distilled, X_test[samples], (28, 28), "results/activation_map.png")
 except Exception as e:
+    raise e
     print(f"Could not generate activation maps: {e}")
 
 # Print summary
@@ -222,7 +226,6 @@ print(f" Baseline student accuracy: {baseline_student_acc:.2f}% ({student_test_t
 print(f" Baseline teacher accuracy: {baseline_teacher_acc:.2f}% ({teacher_test_time:.2f}s)")
 print(f" Distilled student accuracy: {distilled_student_acc:.2f}% ({distilled_test_time:.2f}s)")
 print(f"\nSpeedup: {teacher_test_time/distilled_test_time:.2f}x")
-print(f"Accuracy gain over student: {((1-(distilled_student_acc/baseline_student_acc))*100):.2f}%")
 print(f"Average teacher accuracy: {results['avg_teacher_acc']:.2f}%")
 print(f"Average student accuracy: {results['avg_student_acc']:.2f}%")
 print(f"Average distilled accuracy: {results['avg_distilled_acc']:.2f}%")

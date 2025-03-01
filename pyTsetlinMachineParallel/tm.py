@@ -374,15 +374,13 @@ class MultiClassTsetlinMachine():
 		# Apply softmax with temperature
 		probs = np.exp(class_sums_normalized / temperature)
 		soft_labels = probs / np.sum(probs, axis=1, keepdims=True)
+		print(f"Soft labels after primary scaling:\n{soft_labels}")
 		
-		return soft_labels
-	
-	def get_output_probabilities(self, X):
-		_, class_sums = self.predict_class_sums_2d(X)
-		class_sums += abs(np.min(class_sums))
-		output_probabilities = class_sums / np.sum(class_sums, axis=1, keepdims=True)
-		return output_probabilities
+		# Normalize probabilities
+		soft_labels_normalized = soft_labels / np.sum(soft_labels, axis=1, keepdims=True)
+		print(f"Soft labels after normalization:\n{soft_labels_normalized}")
 
+		return soft_labels_normalized
 	
 	def ta_state(self, mc_tm_class, clause, ta):
 		return _lib.mc_tm_ta_state(self.mc_tm, mc_tm_class, clause, ta)
@@ -480,23 +478,29 @@ class MultiClassTsetlinMachine():
 		clause_weights = self.get_state()[class_idx][0]
 		return np.argsort(-clause_weights)[:n_clauses]
 
-	def init_from_teacher(self, teacher, clauses_per_class, X, Y, weight_portion:float=0.2):
+	def init_from_teacher(self, teacher, clauses_per_class:int, X:np.ndarray, Y:np.ndarray, weight_portion:float=0.2):
 		"""
 		Initialize student with top clauses from teacher
-		
-		Parameters:
-		- teacher: Trained MultiClassTsetlinMachine instance
-		- clauses_per_class: Number of clauses to transfer per class
-		- X: Training data
-		- Y: Training labels
-		- weight_portion: Portion of clauses to transfer based on weight
-		Returns:
-		- self: For method chaining
 		
 		This method selects the most effective clauses from the teacher
 		model and transfers them to the student model. It now includes
 		improved clause diversity by considering both clause weight and
 		activation pattern diversity.
+
+		Parameters:
+		-----------
+		teacher: MultiClassTsetlinMachine
+			The teacher model to initialize from
+		clauses_per_class: int
+			The number of clauses to transfer per class
+		X: np.ndarray
+			The training data
+		Y: np.ndarray
+			The training labels
+		weight_portion: float, optional
+			The portion of clauses to transfer based on weight, 
+			must be between 0 and 1.
+			Default is 0.2.
 		"""
 		# Validate compatibility and initialize TM
 		if self.mc_tm == None:

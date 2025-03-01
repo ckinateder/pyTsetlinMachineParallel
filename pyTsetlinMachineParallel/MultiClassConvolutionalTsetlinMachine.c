@@ -678,32 +678,18 @@ void mc_tm_fit_soft_improved(struct MultiClassTsetlinMachine *mc_tm, unsigned in
             // Get true class label for this example
             int target_class = y[l];
             
-            // Copy soft labels and normalize if needed
+            // Copy soft labels
             float scaled_probs[mc_tm->number_of_classes];
-            float sum = 0.0;
-            
-            // Apply temperature adjustment and calculate sum for normalization
-            // This secondary scaling controls how probabilities influence feedback
-            for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                // Use input temperature to control the final distribution softness
-                // Higher temperature in Python gives softer initial probs, but we sharpen them here
-                scaled_probs[i] = powf(soft_labels[l * mc_tm->number_of_classes + i], 1.0/temperature);
-                sum += scaled_probs[i];
-            }
-            
-            // Normalize the probabilities
-            for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                scaled_probs[i] /= sum;
-            }
-            
+            for (int i = 0; i < mc_tm->number_of_classes; i++) 
+                scaled_probs[i] = soft_labels[l * mc_tm->number_of_classes + i];
+
             /*----------------------------------------------------*/
             /* Hard Label (True Class) Training                   */
             /*----------------------------------------------------*/
             // Apply Type I feedback to true class with probability based on alpha
-            if ((float)fast_rand() / FAST_RAND_MAX <= alpha) {
+            if ((float)fast_rand() / FAST_RAND_MAX <= alpha) 
                 tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], 
                          &X[pos], 1);
-            }
             
             /*----------------------------------------------------*/
             /* Soft Label Training for All Classes                */

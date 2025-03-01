@@ -38,8 +38,8 @@ student_params = {
 }
 
 # Training hyperparameters
-teacher_epochs = 20
-student_epochs = 30
+teacher_epochs = 50
+student_epochs = 100
 skip_train_result = True
 
 # Distillation hyperparameters
@@ -92,6 +92,9 @@ stop_testing = time()
 student_test_time = stop_testing-start_testing
 print(f"Baseline student accuracy: {test_result:.2f}% ({student_test_time:.2f}s)")
 baseline_student_acc = test_result
+
+# Save student checkpoint
+dump(student, open("results/student_checkpoint.pkl", "wb"))
 
 # Train the teacher model
 print(f"Training baseline teacher")

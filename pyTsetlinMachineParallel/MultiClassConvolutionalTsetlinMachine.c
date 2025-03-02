@@ -698,10 +698,10 @@ void mc_tm_fit_soft_improved(struct MultiClassTsetlinMachine *mc_tm, unsigned in
             /* Hard Label (True Class) Training                   */
             /*----------------------------------------------------*/
             // Apply Type I feedback to true class with probability based on alpha
-            if ((float)fast_rand() / FAST_RAND_MAX <= alpha) {
+            //if ((float)fast_rand() / FAST_RAND_MAX <= alpha) {
                 tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], 
                          &X[pos], 1);
-            }
+            //}
             
             /*----------------------------------------------------*/
             /* Soft Label Training for All Classes                */

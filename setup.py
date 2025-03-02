@@ -8,7 +8,7 @@ libTM = Extension('libTM',
 
 setup(
    name='pyTsetlinMachineParallel',
-   version='0.5.0',
+   version='0.6.0',
    authors=['Ole-Christoffer Granmo', 'Calvin Kinateder'],
    author_emails=['ole.granmo@uia.no', 'calvin.kinateder@gmail.com'],
    url='https://github.com/ckinateder/pyTsetlinMachineParallel/',

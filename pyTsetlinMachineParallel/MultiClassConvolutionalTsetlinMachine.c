@@ -678,23 +678,21 @@ void mc_tm_fit_soft_improved(struct MultiClassTsetlinMachine *mc_tm, unsigned in
             // Get true class label for this example
             int target_class = y[l];
             
-            // Copy soft labels and normalize if needed
+            // Apply temperature scaling to soft labels (we already have softmax probabilities)
+            // Use a squared temperature for the same effect as double scaling
+            float adjusted_temperature = temperature * temperature;
             float scaled_probs[mc_tm->number_of_classes];
             float sum = 0.0;
             
-            // Apply temperature adjustment and calculate sum for normalization
-            // This secondary scaling controls how probabilities influence feedback
+            // Single temperature scaling with adjusted temperature gives same effect
             for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                // Use input temperature to control the final distribution softness
-                // Higher temperature in Python gives softer initial probs, but we sharpen them here
-                scaled_probs[i] = powf(soft_labels[l * mc_tm->number_of_classes + i], 1.0/temperature);
+                scaled_probs[i] = powf(soft_labels[l * mc_tm->number_of_classes + i], 1.0/adjusted_temperature);
                 sum += scaled_probs[i];
             }
             
-            // Normalize the probabilities
-            for (int i = 0; i < mc_tm->number_of_classes; i++) {
+            // Single normalization
+            for (int i = 0; i < mc_tm->number_of_classes; i++) 
                 scaled_probs[i] /= sum;
-            }
             
             /*----------------------------------------------------*/
             /* Hard Label (True Class) Training                   */

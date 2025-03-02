@@ -362,27 +362,37 @@ class MultiClassTsetlinMachine():
 		_lib.mc_tm_predict_with_class_sums_2d(self.mc_tm, self.encoded_X, Y, class_sums, number_of_examples)
 		return Y, class_sums
 	
-	def get_soft_labels(self, X, temperature=1.0):
+	def get_soft_labels(self, X: np.ndarray) -> np.ndarray:
+		"""
+		Get soft labels for each example in X.
+		THis is done by shifting the class sums to be non-negative, then normalizing by the max absolute value, and then applying softmax.
+		Example:
+		>>> soft_labels = tm.get_soft_labels(X)
+		>>> print(soft_labels)
+		[ 	[8.77e-02 1.02e-01 9.76e-02 1.07e-01 9.15e-02 1.01e-01 7.93e-02 9.13e-02 1.43e-01 9.92e-02]
+			[9.60e-02 9.65e-02 9.35e-02 1.00e-01 9.51e-02 1.01e-01 8.45e-02 1.36e-01 1.06e-01 9.24e-02]
+			[1.48e-01 9.17e-02 8.03e-02 9.63e-02 9.14e-02 1.04e-01 9.65e-02 9.21e-02 1.02e-01 9.79e-02]
+			[8.74e-02 1.44e-01 1.02e-01 9.28e-02 9.65e-02 1.04e-01 9.87e-02 8.50e-02 9.99e-02 9.02e-02]
+			[9.52e-02 9.04e-02 1.00e-01 9.21e-02 1.47e-01 1.11e-01 1.03e-01 8.62e-02 9.26e-02 8.26e-02]
+		 ....
+		]
+		"""
 		Y, class_sums = self.predict_class_sums_2d(X)
 		
+		# shift class sums to be non-negative
+		class_sums_shifted = class_sums + abs(np.min(class_sums))
+		
 		# Handle potential division by zero 
-		max_abs_values = np.maximum(np.max(np.abs(class_sums), axis=1, keepdims=True), 1.0)
+		max_abs_values = np.max(np.abs(class_sums_shifted), axis=1, keepdims=True)
 		
 		# Normalize class sums by max absolute value
-		class_sums_normalized = class_sums / max_abs_values
-		
-		# Apply softmax with temperature
-		probs = np.exp(class_sums_normalized / temperature)
-		soft_labels = probs / np.sum(probs, axis=1, keepdims=True)
-		
-		return soft_labels
-	
-	def get_output_probabilities(self, X):
-		_, class_sums = self.predict_class_sums_2d(X)
-		class_sums += abs(np.min(class_sums))
-		output_probabilities = class_sums / np.sum(class_sums, axis=1, keepdims=True)
-		return output_probabilities
+		class_sums_normalized = class_sums_shifted / max_abs_values
+				
+		# Regular softmax
+		probs = np.exp(class_sums_normalized)
+		soft_labels_shifted = probs / np.sum(probs, axis=1, keepdims=True)
 
+		return soft_labels_shifted
 	
 	def ta_state(self, mc_tm_class, clause, ta):
 		return _lib.mc_tm_ta_state(self.mc_tm, mc_tm_class, clause, ta)

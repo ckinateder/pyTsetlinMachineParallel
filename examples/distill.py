@@ -38,8 +38,8 @@ student_params = {
 }
 
 # Training hyperparameters
-teacher_epochs = 20
-student_epochs = 30
+teacher_epochs = 50
+student_epochs = 100
 skip_train_result = True
 
 # Distillation hyperparameters
@@ -138,8 +138,9 @@ print("First 5 soft labels:")
 for i in range(5):
     label_row = soft_labels[i]
     print(f" [" + " ".join([f"{x:.2e}" for x in label_row]) + "]")
+print("First 5 output probabilities:")
 
-# Train distilled model with soft labels
+# Train distilled model with soft la    bels
 print(f"Training student with soft labels (alpha={alpha}, temperature={temperature})")
 distilled_history = []
 

@@ -490,7 +490,7 @@ class MultiClassTsetlinMachine():
 		clause_weights = self.get_state()[class_idx][0]
 		return np.argsort(-clause_weights)[:n_clauses]
 
-	def init_from_teacher(self, teacher, clauses_per_class, X, Y, weight_portion:float=0.2):
+	def init_from_teacher(self, teacher, clauses_per_class, X, Y, z:float=0.2):
 		"""
 		Initialize student with top clauses from teacher
 		
@@ -499,7 +499,7 @@ class MultiClassTsetlinMachine():
 		- clauses_per_class: Number of clauses to transfer per class
 		- X: Training data
 		- Y: Training labels
-		- weight_portion: Portion of clauses to transfer based on weight
+		- z: Portion of clauses to transfer based on weight
 		Returns:
 		- self: For method chaining
 		
@@ -507,6 +507,15 @@ class MultiClassTsetlinMachine():
 		model and transfers them to the student model. It now includes
 		improved clause diversity by considering both clause weight and
 		activation pattern diversity.
+
+		Steps:
+		For each class:
+			Select the top z*100% of clauses directly based on weight
+			For the remaining (1-z)*100% of clauses, select based on both weight and diversity
+				Calculate the diversity of the clause as the ratio of active TAs to total TAs
+				Score the clause based on weight and diversity
+				Select the top (1-z)*100% of clauses based on diversity
+			Transfer the selected clauses to the student
 		"""
 		# Validate compatibility and initialize TM
 		if self.mc_tm == None:
@@ -526,7 +535,7 @@ class MultiClassTsetlinMachine():
 			raise ValueError("Student and teacher must have same number of state bits")
 		if not teacher.weighted_clauses:
 			warnings.warn("Initializing from unweighted teacher - this is not recommended!")
-		if weight_portion < 0 or weight_portion > 1:
+		if z < 0 or z > 1:
 			raise ValueError("Weight portion must be between 0 and 1")
 
 		student_state = self.get_state()
@@ -543,24 +552,15 @@ class MultiClassTsetlinMachine():
 			selected_indices = []
 			ta_per_clause = self.number_of_ta_chunks * self.number_of_state_bits
 			
-			# First, select the top 20% clauses directly based on weight
-			direct_selection = max(1, int(clauses_per_class * weight_portion))
+			# First, select the top (z*100)% clauses directly based on weight
+			direct_selection = max(1, int(clauses_per_class * z))
 			selected_indices.extend(top_indices[:direct_selection])
 			
 			# For the remaining clauses, select based on both weight and diversity
 			remaining_indices = top_indices[direct_selection:]
 			
-			# Sample training examples to evaluate clause patterns
-			sample_size = min(100, X.shape[0])
-			sample_indices = np.random.choice(X.shape[0], sample_size, replace=False)
-			X_sample = X[sample_indices]
-			
-			# Get encoded samples
-			self.encoded_X = np.ascontiguousarray(np.empty(int(sample_size * self.number_of_ta_chunks), dtype=np.uint32))
-			
 			# For diversity selection, measure how clauses activate on sample data
 			remaining_count = clauses_per_class - direct_selection
-			config_norms = []
 
 			if remaining_count > 0 and len(remaining_indices) > 0:
 				# Choose clauses that have diverse activation patterns
@@ -579,7 +579,7 @@ class MultiClassTsetlinMachine():
 
 					# Get a normalized score between 0 and 1
 					ta_config_norm = active_count / ta_per_clause  # Properly normalized between 0-1
-					config_norms.append(ta_config_norm)
+
 					# Score based on weight and configuration uniqueness
 					weight_score = t_weights[idx] / max(t_weights)  # Normalize weight
 					diversity_score = weight_score * (0.5 + 0.5 * ta_config_norm)  # Balance weight and config
@@ -590,6 +590,7 @@ class MultiClassTsetlinMachine():
 				candidate_diversity_scores.sort(key=lambda x: x[1], reverse=True)
 				selected_indices.extend([idx for idx, _ in candidate_diversity_scores[:remaining_count]])
 			
+			## Transfer the selected clauses to the student
 			# Get student state for this class
 			s_weights, s_ta = student_state[class_idx]
 			

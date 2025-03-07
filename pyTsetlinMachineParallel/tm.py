@@ -380,7 +380,7 @@ class MultiClassTsetlinMachine():
 		Y, class_sums = self.predict_class_sums_2d(X)
 		
 		# shift class sums to be non-negative
-		class_sums_shifted = class_sums + abs(np.min(class_sums))
+		class_sums_shifted = class_sums + np.abs(np.min(class_sums, axis=1, keepdims=True))
 		
 		# Handle potential division by zero 
 		max_abs_values = np.max(np.abs(class_sums_shifted), axis=1, keepdims=True)
@@ -551,7 +551,7 @@ class MultiClassTsetlinMachine():
 			# Get teacher state for this class
 			t_weights, t_ta = teacher.get_state()[class_idx]
 			
-			# Get initial top indices based on weights
+			# Get initial top indices based on weights - consider all clauses in teacher
 			top_indices = teacher.get_top_clause_indices(class_idx, len(t_weights))
 			
 			# First, select the top (z*100)% clauses directly based on weight

@@ -48,59 +48,6 @@ Documentation coming soon at https://pytsetlinmachineparallel.readthedocs.io/en/
 
 Convolutional Tsetlin Machine tutorial, https://github.com/cair/convolutional-tsetlin-machine-tutorial
 
-## Future Work (READ ME!)
-
-This implementation is a work in progress. There are more things I plan to look at. Here is the current state:
-
-This works for MNIST. I can't seem to get it to work for KMNIST. I'm not sure why. It seems like the `init_from_teacher` function is making more of an impact than the `fit_soft` function. 
-
-Parameters that work for MNIST (see example down below):
-```json
-teacher_params = {
-    "number_of_clauses": 1000,
-    "T": 10,
-    "s": 4,
-    "boost_true_positive_feedback": 1,
-    "number_of_state_bits": 8,
-    "append_negated": True,
-    "weighted_clauses": True
-}
-
-student_params = {
-    "number_of_clauses": 100,
-    "T": 10,
-    "s": 4,
-    "boost_true_positive_feedback": 1,
-    "number_of_state_bits": 8,
-    "append_negated": True,
-    "weighted_clauses": True
-}
-temperature = 4.0
-```
-
-Some parameters for a starting point:
-
-| Dataset | $C_T$ | $T_T$ | $s_T$ | $C_S$ | $T_S$ | $s_S$ | Temperature | Epochs Teacher | Epochs Student |
-|---------|-------|-------|-------|-------|-------|-------|-------------|----------------|----------------|
-| MNIST   | 1000  | 100   | 7     | 100   | 100   | 7     | 4.0         | 20             | 30             |
-| KMNIST  | 1000  | 100   | 8.6   | 100   | 100   | 8.6   | 4.0         | 20             | 30             |
-
-
-Important changes that were made:
-- `MultiClassTsetlinMachine.init_from_teacher` was added to initialize the student from a teacher model
-- `mc_tm_fit_soft` was added to support soft labels for distillation for picking the negative examples
-- `MultiClassTsetlinMachine.fit_soft` was added to support soft labels for distillation for the teacher
-- `mc_tm_predict_with_class_sums_2d` was modified to remove the clamping of the class sums
-- Added activation maps
-
-Things to revist:
-- [ ] `MultiClassTsetlinMachine.init_from_teacher`
-  - [ ] Ensure that all the correct clauses are being transferred
-- [ ] `MultiClassTsetlinMachine.fit_soft` and `mc_tm_fit_soft`
-  - [ ] Ensure that the soft labels are being generated correctly (no zeros or overflows)
-  - [ ] Play around with the temperature parameter
-  - [ ] Vary T for the teacher and student
-
 ## Examples
 
 ### Multiclass Demo
@@ -118,10 +65,11 @@ from keras.datasets import mnist, fashion_mnist
 X_train = np.where(X_train.reshape((X_train.shape[0], 28*28)) > 75, 1, 0) 
 X_test = np.where(X_test.reshape((X_test.shape[0], 28*28)) > 75, 1, 0) 
 
+
 teacher_params = {
     "number_of_clauses": 1000,
-    "T": 5,
-    "s": 3,
+    "T": 100,
+    "s": 8.2,
     "boost_true_positive_feedback": 1,
     "number_of_state_bits": 8,
     "append_negated": True,
@@ -130,8 +78,8 @@ teacher_params = {
 
 student_params = {
     "number_of_clauses": 100,
-    "T": 5,
-    "s": 3,
+    "T": 100,
+    "s": 8.2,
     "boost_true_positive_feedback": 1,
     "number_of_state_bits": 8,
     "append_negated": True,
@@ -139,13 +87,13 @@ student_params = {
 }
 
 teacher = MultiClassTsetlinMachine(**teacher_params)
-teacher.fit(X_train, Y_train, epochs=20)
+teacher.fit(X_train, Y_train, epochs=50)
 
 student = MultiClassTsetlinMachine(**student_params)
-student.init_from_teacher(teacher, student_params['number_of_clauses'], X_train, Y_train)
-soft_labels = teacher.get_soft_labels(X_train, temperature=4)
+distilled.init_from_teacher(teacher, X_train, Y_train, student_params['number_of_clauses'])
+soft_labels = teacher.get_soft_labels(X_train)
 
-student.fit_soft(X_train, Y_train, soft_labels, epochs=30)
+student.fit_soft(X_train, Y_train, soft_labels, epochs=150)
 ```
 
 **See examples/distill.py for more detailed code.**

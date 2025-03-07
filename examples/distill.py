@@ -127,7 +127,7 @@ teacher = load(open("results/teacher_checkpoint.pkl", "rb"))
 # Initialize student from teacher
 distilled = MultiClassTsetlinMachine(**student_params)
 print(f"Initializing student with {student_params['number_of_clauses']} clauses from teacher")
-distilled.init_from_teacher(teacher, student_params['number_of_clauses'], X_train, Y_train)
+distilled.init_from_teacher(teacher, X_train, Y_train)
 
 # Generate soft labels with temperature
 print(f"Generating soft labels from teacher with temperature {temperature}")

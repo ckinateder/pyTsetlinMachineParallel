@@ -490,13 +490,12 @@ class MultiClassTsetlinMachine():
 		clause_weights = self.get_state()[class_idx][0]
 		return np.argsort(-clause_weights)[:n_clauses]
 
-	def init_from_teacher(self, teacher, clauses_per_class, X, Y, z:float=0.2):
+	def init_from_teacher(self, teacher, X, Y, z:float=0.2):
 		"""
 		Initialize student with top clauses from teacher
 		
 		Parameters:
 		- teacher: Trained MultiClassTsetlinMachine instance
-		- clauses_per_class: Number of clauses to transfer per class
 		- X: Training data
 		- Y: Training labels
 		- z: Portion of clauses to transfer based on weight
@@ -538,35 +537,37 @@ class MultiClassTsetlinMachine():
 		if z < 0 or z > 1:
 			raise ValueError("Weight portion must be between 0 and 1")
 
+		# Get student state
 		student_state = self.get_state()
 		
+		# Analyze clause diversity by examining TAs
+		ta_per_clause = self.number_of_ta_chunks * self.number_of_state_bits
+
 		# For each class
 		for class_idx in range(self.number_of_classes):
 			# Get teacher state for this class
 			t_weights, t_ta = teacher.get_state()[class_idx]
 			
-			# Get initial top indices based on weights
-			top_indices = teacher.get_top_clause_indices(class_idx, min(clauses_per_class * 3, len(t_weights)))
-			
-			# Analyze clause diversity by examining TAs
-			selected_indices = []
-			ta_per_clause = self.number_of_ta_chunks * self.number_of_state_bits
+			# Get initial top indices based on weights - multiply by 3 to allow for greater diversity selection
+			top_indices = teacher.get_top_clause_indices(class_idx, len(t_weights))
 			
 			# First, select the top (z*100)% clauses directly based on weight
-			direct_selection = max(1, int(clauses_per_class * z))
+			direct_selection = max(1, int(self.number_of_clauses * z))
+			selected_indices = []
 			selected_indices.extend(top_indices[:direct_selection])
 			
 			# For the remaining clauses, select based on both weight and diversity
-			remaining_indices = top_indices[direct_selection:]
+			remaining_indices_t = top_indices[direct_selection:] # teacher indices
 			
 			# For diversity selection, measure how clauses activate on sample data
-			remaining_count = clauses_per_class - direct_selection
+			remaining_count_s = self.number_of_clauses - direct_selection # to be copied to student
+			# note that if remaining_indices_t will be more than remaining_count_s.
 
-			if remaining_count > 0 and len(remaining_indices) > 0:
+			if remaining_count_s > 0 and len(remaining_indices_t) > 0:
 				# Choose clauses that have diverse activation patterns
 				candidate_diversity_scores = []
 				
-				for idx in remaining_indices:
+				for idx in remaining_indices_t:
 					# Extract TA configuration for this clause
 					clause_ta_config = t_ta[idx*ta_per_clause:(idx+1)*ta_per_clause]
 
@@ -588,7 +589,7 @@ class MultiClassTsetlinMachine():
 				
 				# Sort by diversity score and select remaining clauses
 				candidate_diversity_scores.sort(key=lambda x: x[1], reverse=True)
-				selected_indices.extend([idx for idx, _ in candidate_diversity_scores[:remaining_count]])
+				selected_indices.extend([idx for idx, _ in candidate_diversity_scores[:remaining_count_s]])
 			
 			## Transfer the selected clauses to the student
 			# Get student state for this class
@@ -598,7 +599,6 @@ class MultiClassTsetlinMachine():
 			n_copy = min(len(selected_indices), len(s_weights))
 			
 			# Copy weights and TA states
-			ta_per_clause = self.number_of_ta_chunks * self.number_of_state_bits
 			for i in range(n_copy):
 				# Get source and destination indices
 				src = selected_indices[i]

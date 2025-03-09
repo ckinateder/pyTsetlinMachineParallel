@@ -7,3 +7,5 @@ build
 *.so
 .specstory
 data
+pdist.py
+results

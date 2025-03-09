@@ -686,7 +686,7 @@ void mc_tm_fit_soft_improved(struct MultiClassTsetlinMachine *mc_tm, unsigned in
             
             // Single temperature scaling with adjusted temperature gives same effect
             for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                scaled_probs[i] = powf(soft_labels[l * mc_tm->number_of_classes + i], 1.0/adjusted_temperature);
+                scaled_probs[i] = powf(soft_labels[l * mc_tm->number_of_classes + i], 1.0/temperature);
                 sum += scaled_probs[i];
             }
             

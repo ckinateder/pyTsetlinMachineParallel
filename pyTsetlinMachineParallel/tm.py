@@ -489,6 +489,16 @@ class MultiClassTsetlinMachine():
 		
 		clause_weights = self.get_state()[class_idx][0]
 		return np.argsort(-clause_weights)[:n_clauses]
+	
+	def _count_active_tas(self, clause_ta_config):
+		"""
+		Count the number of active TAs in a clause configuration
+		"""
+		active_count = 0
+		for ta_idx in range(self.number_of_ta_chunks * self.number_of_state_bits):
+			if (clause_ta_config[ta_idx] & (1 << 31)) > 0:
+				active_count += 1
+		return active_count
 
 	def init_from_teacher(self, teacher, X, Y, clauses_per_class=None, z:float=0.2):
 		"""
@@ -571,22 +581,15 @@ class MultiClassTsetlinMachine():
 				candidate_diversity_scores = []
 				
 				for idx in remaining_indices_t:
-					# Extract TA configuration for this clause
-					clause_ta_config = t_ta[idx*ta_per_clause:(idx+1)*ta_per_clause]
-
-					# Count activations on sample data
-					active_count = 0
-					for ta_idx in range(ta_per_clause):
-						ta_action = (clause_ta_config[ta_idx] & (1 << 31)) > 0  # Check if action bit is set
-						if ta_action:
-							active_count += 1
+					# Extract TA configuration for this clause and count active TAs
+					active_count = self._count_active_tas(t_ta[idx*ta_per_clause:(idx+1)*ta_per_clause])
 
 					# Get a normalized score between 0 and 1
 					ta_config_norm = active_count / ta_per_clause  # Properly normalized between 0-1
 
 					# Score based on weight and configuration uniqueness
 					weight_score = t_weights[idx] / max(t_weights)  # Normalize weight
-					diversity_score = weight_score * (0.5 + 0.5 * ta_config_norm)  # Balance weight and config
+					diversity_score = weight_score * ta_config_norm  # Balance weight and config
 					
 					candidate_diversity_scores.append((idx, diversity_score))
 				

@@ -30,6 +30,7 @@ https://arxiv.org/abs/1905.09688
 #include <omp.h>
 #include "fast_rand.h"
 #include "MultiClassConvolutionalTsetlinMachine.h"
+#include <math.h>
 
 /**************************************/
 /*** The Convolutional Tsetlin Machine ***/

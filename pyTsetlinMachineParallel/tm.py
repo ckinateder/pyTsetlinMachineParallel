@@ -110,10 +110,10 @@ _lib.tm_encode.restype = None
 _lib.tm_encode.argtypes = [array_1d_uint, array_1d_uint, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int] 
 
 _lib.mc_tm_fit_soft.restype = None                      
-_lib.mc_tm_fit_soft.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int]
+_lib.mc_tm_fit_soft.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int, C.c_float, C.c_float]
 
-_lib.mc_tm_fit_soft_improved.restype = None                      
-_lib.mc_tm_fit_soft_improved.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int, C.c_float, C.c_float]
+_lib.mc_tm_fit_soft_nn.restype = None                      
+_lib.mc_tm_fit_soft_nn.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int, C.c_float]
 
 class MultiClassConvolutionalTsetlinMachine2D():
 	def __init__(self, number_of_clauses, T, s, patch_dim, boost_true_positive_feedback=1, number_of_state_bits=8, append_negated=True, weighted_clauses=False, s_range=False):
@@ -362,7 +362,7 @@ class MultiClassTsetlinMachine():
 		_lib.mc_tm_predict_with_class_sums_2d(self.mc_tm, self.encoded_X, Y, class_sums, number_of_examples)
 		return Y, class_sums
 	
-	def get_soft_labels(self, X: np.ndarray) -> np.ndarray:
+	def get_soft_labels(self, X: np.ndarray, temperature: float = 1.0) -> np.ndarray:
 		"""
 		Get soft labels for each example in X.
 		THis is done by shifting the class sums to be non-negative, then normalizing by the max absolute value, and then applying softmax.
@@ -389,7 +389,7 @@ class MultiClassTsetlinMachine():
 		class_sums_normalized = class_sums_shifted / max_abs_values
 				
 		# Regular softmax
-		probs = np.exp(class_sums_normalized)
+		probs = np.exp(class_sums_normalized / temperature)
 		soft_labels_shifted = probs / np.sum(probs, axis=1, keepdims=True)
 
 		return soft_labels_shifted
@@ -475,10 +475,41 @@ class MultiClassTsetlinMachine():
 		else:
 			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
 		
-		_lib.mc_tm_fit_soft_improved(self.mc_tm, self.encoded_X, Ym, Softm, number_of_examples, epochs, alpha, temperature)
+		_lib.mc_tm_fit_soft(self.mc_tm, self.encoded_X, Ym, Softm, number_of_examples, epochs, alpha, temperature)
 
 		return
 
+	def fit_soft_nn(self, X, Y, soft_labels, epochs=100, incremental=False, alpha=0.5):
+		number_of_examples = X.shape[0]
+
+		if self.mc_tm == None:
+			self.number_of_classes = int(np.max(Y) + 1)
+			if self.append_negated:
+				self.number_of_features = X.shape[1]*2
+			else:
+				self.number_of_features = X.shape[1]
+
+			self.number_of_patches = 1
+			self.number_of_ta_chunks = int((self.number_of_features-1)/32 + 1)
+			self.mc_tm = _lib.CreateMultiClassTsetlinMachine(self.number_of_classes, self.number_of_clauses, self.number_of_features, 1, self.number_of_ta_chunks, self.number_of_state_bits, self.T, self.s, self.s_range, self.boost_true_positive_feedback, self.weighted_clauses)
+		elif incremental == False:
+			_lib.mc_tm_destroy(self.mc_tm)
+			self.mc_tm = _lib.CreateMultiClassTsetlinMachine(self.number_of_classes, self.number_of_clauses, self.number_of_features, 1, self.number_of_ta_chunks, self.number_of_state_bits, self.T, self.s, self.s_range, self.boost_true_positive_feedback, self.weighted_clauses)
+
+		self.encoded_X = np.ascontiguousarray(np.empty(int(number_of_examples * self.number_of_ta_chunks), dtype=np.uint32))
+
+		Xm = np.ascontiguousarray(X.flatten()).astype(np.uint32)
+		Ym = np.ascontiguousarray(Y).astype(np.uint32)
+		Softm = np.ascontiguousarray(soft_labels).astype(np.float32)
+
+		if self.append_negated:
+			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features//2, 1, 1, self.number_of_features//2, 1, 1)
+		else:
+			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
+		
+		_lib.mc_tm_fit_soft_nn(self.mc_tm, self.encoded_X, Ym, Softm, number_of_examples, epochs, alpha)
+
+		return
 	def get_top_clause_indices(self, class_idx, n_clauses):
 		"""
 		Returns indices of top n_clauses for specified class

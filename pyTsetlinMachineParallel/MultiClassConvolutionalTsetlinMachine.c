@@ -506,6 +506,9 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
             
             // Get true class label for this example
             int target_class = y[l];
+            if (target_class < 0 || target_class >= mc_tm->number_of_classes) {
+                continue;
+            }
             
             // Apply temperature scaling to soft labels (we already have softmax probabilities)
             // Use a squared temperature for the same effect as double scaling
@@ -616,7 +619,7 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
  * - soft_labels: Probability distribution from teacher model (already temperature-scaled)
  * - number_of_examples: Number of training examples
  * - epochs: Number of training epochs
- * - alpha: Balance between hard and soft labels (0.0 = all soft, 1.0 = all hard)
+ * - alpha: Balance between hard and soft labels (0.0 = all hard, 1.0 = all soft)
  * - temperature: Controls additional temperature scaling for training dynamics
  *   - Higher values make the system more sensitive to teacher confidences
  *   - A temperature around 2-4 works well for most cases
@@ -681,15 +684,15 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
 
             float r = (float)fast_rand() / FAST_RAND_MAX;
 
-            
-            if (r >= alpha) {
+            //if (r >= alpha) {
                 tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], &X[pos], 1);
-                int negative_target_class = (int)number_of_classes * 1.0*rand()/((int)RAND_MAX + 1);
+                unsigned int negative_target_class = (unsigned int)number_of_classes * 1.0*rand()/((unsigned int)RAND_MAX + 1);
                 while (negative_target_class == target_class) {
-                    negative_target_class = (int)number_of_classes * 1.0*rand()/((int)RAND_MAX + 1);
+                    negative_target_class = (unsigned int)number_of_classes * 1.0*rand()/((unsigned int)RAND_MAX + 1);
                 }
                 tm_update(mc_tm_thread[thread_id]->tsetlin_machines[negative_target_class], &X[pos], 0);
-            } else {
+            //} 
+             if (r < alpha) {
                 for (int i = 0; i < number_of_classes; i++) {
                     float p = soft_labels[l * number_of_classes + i];
                     if (p > 1.0 / number_of_classes) {

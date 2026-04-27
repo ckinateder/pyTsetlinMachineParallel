@@ -412,7 +412,7 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
  *   - A temperature around 2-4 works well for most cases
  *   - This parameter is used to sharpen/soften the teacher's probability distribution
  */
-void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs, float alpha, float temperature)
+void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, float *feedback_multipliers, int number_of_examples, int epochs, float alpha)
 {
     /*------------------------------------------------------------*/
     /* Initialization and Setup                                   */
@@ -495,22 +495,6 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
             // Get true class label for this example
             int target_class = y[l];
             
-            // Apply temperature scaling to soft labels (we already have softmax probabilities)
-            // Use a squared temperature for the same effect as double scaling
-            float adjusted_temperature = temperature * temperature;
-            float scaled_probs[mc_tm->number_of_classes];
-            float sum = 0.0;
-            
-            // Single temperature scaling with adjusted temperature gives same effect
-            for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                scaled_probs[i] = powf(soft_labels[l * mc_tm->number_of_classes + i], 1.0/adjusted_temperature);
-                sum += scaled_probs[i];
-            }
-            
-            // Single normalization
-            for (int i = 0; i < mc_tm->number_of_classes; i++) 
-                scaled_probs[i] /= sum;
-            
             /*----------------------------------------------------*/
             /* Hard Label (True Class) Training                   */
             /*----------------------------------------------------*/
@@ -534,26 +518,14 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
                 if (i == target_class && alpha > 0.0) continue;
                 
                 // Calculate base feedback probability based on soft label
-                float feedback_prob = (1.0 - alpha) * scaled_probs[i];
-                
+                float sp = soft_labels[l * mc_tm->number_of_classes + i];
+                float feedback_prob = (1.0 - alpha) * sp;
+
                 // No training if probability is too small
                 if (feedback_prob < 0.001) continue;
-                
-                // Determine if we should give positive or negative feedback
-                // For high probabilities from teacher, train with positive feedback (1)
-                // For low probabilities, train with negative feedback (0)
-                int feedback_type = 0;
-                if (scaled_probs[i] > 0.5) {
-                    feedback_type = 1;
-                    // Strengthen positive feedback based on teacher confidence
-                    // Higher temperature makes this more aggressive
-                    feedback_prob = feedback_prob * (1.0 + scaled_probs[i] * temperature);
-                } else {
-                    feedback_type = 0;
-                    // Strengthen negative feedback based on teacher confidence
-                    // Higher temperature makes this more aggressive
-                    feedback_prob = feedback_prob * (1.0 + (1.0 - scaled_probs[i]) * temperature);
-                }
+
+                int feedback_type = (sp > 0.5) ? 1 : 0;
+                feedback_prob *= feedback_multipliers[l * mc_tm->number_of_classes + i];
                 
                 // Apply feedback with probability proportional to soft label strength
                 if ((float)fast_rand() / FAST_RAND_MAX <= feedback_prob) {

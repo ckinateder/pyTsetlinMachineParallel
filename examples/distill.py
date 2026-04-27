@@ -114,7 +114,7 @@ if __name__ == "__main__":
 
     print("\nInitializing student from teacher and generating soft labels...")
     student.init_from_teacher(best_teacher, x_train, y_train, clauses_per_class=STUDENT_PARAMS["C"], z=Z)
-    soft_labels = best_teacher.get_soft_labels(x_train)
+    soft_labels = best_teacher.get_soft_labels(x_train, temperature=TEMPERATURE)
 
     print("\nTraining student with KD...")
     student_acc = train_model(

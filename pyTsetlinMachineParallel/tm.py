@@ -110,7 +110,7 @@ _lib.tm_encode.restype = None
 _lib.tm_encode.argtypes = [array_1d_uint, array_1d_uint, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int] 
 
 _lib.mc_tm_fit_soft.restype = None                      
-_lib.mc_tm_fit_soft.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int, C.c_float, C.c_float]
+_lib.mc_tm_fit_soft.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, np.ctypeslib.ndpointer(dtype=np.float32), np.ctypeslib.ndpointer(dtype=np.float32), C.c_int, C.c_int, C.c_float]
 
 class MultiClassConvolutionalTsetlinMachine2D():
 	def __init__(self, number_of_clauses, T, s, patch_dim, boost_true_positive_feedback=1, number_of_state_bits=8, append_negated=True, weighted_clauses=False, s_range=False):
@@ -359,7 +359,7 @@ class MultiClassTsetlinMachine():
 		_lib.mc_tm_predict_with_class_sums_2d(self.mc_tm, self.encoded_X, Y, class_sums, number_of_examples)
 		return Y, class_sums
 	
-	def get_soft_labels(self, X: np.ndarray) -> np.ndarray:
+	def get_soft_labels(self, X: np.ndarray, temperature: float = 1.0) -> np.ndarray:
 		"""
 		Get soft labels for each example in X.
 		THis is done by shifting the class sums to be non-negative, then normalizing by the max absolute value, and then applying softmax.
@@ -388,6 +388,11 @@ class MultiClassTsetlinMachine():
 		# Regular softmax
 		probs = np.exp(class_sums_normalized)
 		soft_labels_shifted = probs / np.sum(probs, axis=1, keepdims=True)
+
+		if temperature != 1.0:
+			adj_t = temperature * temperature
+			scaled = np.power(soft_labels_shifted, 1.0 / adj_t)
+			soft_labels_shifted = scaled / scaled.sum(axis=1, keepdims=True)
 
 		return soft_labels_shifted
 	
@@ -465,14 +470,22 @@ class MultiClassTsetlinMachine():
 
 		Xm = np.ascontiguousarray(X.flatten()).astype(np.uint32)
 		Ym = np.ascontiguousarray(Y).astype(np.uint32)
-		Softm = np.ascontiguousarray(soft_labels).astype(np.float32)
+
+		# soft_labels expected to be pre-scaled (e.g. via get_soft_labels(X, temperature=T))
+		# only compute feedback multipliers here
+		scaled = soft_labels.astype(np.float32)
+		conf = np.where(scaled > 0.5, scaled, 1.0 - scaled)
+		fb_mult = (1.0 + conf * temperature).astype(np.float32)
+
+		Softm = np.ascontiguousarray(scaled)
+		FBm = np.ascontiguousarray(fb_mult)
 
 		if self.append_negated:
 			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features//2, 1, 1, self.number_of_features//2, 1, 1)
 		else:
 			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
-		
-		_lib.mc_tm_fit_soft(self.mc_tm, self.encoded_X, Ym, Softm, number_of_examples, epochs, alpha, temperature)
+
+		_lib.mc_tm_fit_soft(self.mc_tm, self.encoded_X, Ym, Softm, FBm, number_of_examples, epochs, alpha)
 
 		return
 

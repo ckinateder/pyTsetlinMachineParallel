@@ -694,23 +694,11 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
             
             // Get true class label for this example
             int target_class = y[l];
-            
-            // Apply temperature scaling to soft labels (we already have softmax probabilities)
-            // Use a squared temperature for the same effect as double scaling
-            float temperature = 1.0;
-            float adjusted_temperature = temperature * temperature;
-            float scaled_probs[mc_tm->number_of_classes];
-            float sum = 0.0;
-            
-            // Single temperature scaling with adjusted temperature gives same effect
-            for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                scaled_probs[i] = powf(soft_labels[l * mc_tm->number_of_classes + i], 1.0/adjusted_temperature);
-                sum += scaled_probs[i];
-            }
-            
-            // Single normalization
-            for (int i = 0; i < mc_tm->number_of_classes; i++) 
-                scaled_probs[i] /= sum;
+            int number_of_classes = mc_tm->number_of_classes;
+
+            float scaled_probs[number_of_classes];
+            for (int i = 0; i < number_of_classes; i++) 
+                scaled_probs[i] = soft_labels[l * number_of_classes + i];
             
             /*----------------------------------------------------*/
             /* Hard Label (True Class) Training                   */
@@ -721,10 +709,7 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
             // - student mimics teacher better
             // - can help with label noise
             // - "dark" knowledge from teacher is preserved
-            if ((float)fast_rand() / FAST_RAND_MAX <= alpha) {
-                tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], 
-                         &X[pos], 1);
-            }
+            tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], &X[pos], 1);
             
             /*----------------------------------------------------*/
             /* Soft Label Training for All Classes                */
@@ -732,10 +717,10 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
             // Process ALL classes using soft labels
             for (int i = 0; i < mc_tm->number_of_classes; i++) {
                 // Skip true class if already trained with hard labels
-                if (i == target_class && alpha > 0.0) continue;
+                if (i == target_class) continue;
                 
                 // Calculate base feedback probability based on soft label
-                float feedback_prob = (1.0 - alpha) * scaled_probs[i];
+                float feedback_prob = scaled_probs[i];
                 
                 // No training if probability is too small
                 if (feedback_prob < 0.001) continue;
@@ -744,20 +729,15 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
                 // For high probabilities from teacher, train with positive feedback (1)
                 // For low probabilities, train with negative feedback (0)
                 int feedback_type = 0;
-                if (scaled_probs[i] > 0.5) {
+                if (scaled_probs[i] > (1.0/number_of_classes)) {
                     feedback_type = 1;
-                    // Strengthen positive feedback based on teacher confidence
-                    // Higher temperature makes this more aggressive
-                    feedback_prob = feedback_prob * (1.0 + scaled_probs[i] * temperature);
                 } else {
                     feedback_type = 0;
-                    // Strengthen negative feedback based on teacher confidence
-                    // Higher temperature makes this more aggressive
-                    feedback_prob = feedback_prob * (1.0 + (1.0 - scaled_probs[i]) * temperature);
+                    feedback_prob = 1.0 - scaled_probs[i];
                 }
                 
                 // Apply feedback with probability proportional to soft label strength
-                if ((float)fast_rand() / FAST_RAND_MAX <= feedback_prob) {
+                if ((float)fast_rand() / FAST_RAND_MAX <= (1.0 - alpha) * feedback_prob) {
                     tm_update(mc_tm_thread[thread_id]->tsetlin_machines[i], 
                              &X[pos], feedback_type);
                 }

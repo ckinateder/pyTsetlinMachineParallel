@@ -223,12 +223,15 @@ void mc_tm_update(struct MultiClassTsetlinMachine *mc_tm, unsigned int *Xi, int 
 
 void mc_tm_fit(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, int number_of_examples, int epochs)
 {
+	// One training example occupies one patch-vector per TA chunk.
 	unsigned int step_size = mc_tm->number_of_patches * mc_tm->number_of_ta_chunks;
 
+	// Build thread-local wrappers while sharing the real model state.
 	int max_threads = omp_get_max_threads();
 	struct MultiClassTsetlinMachine **mc_tm_thread = (void *)malloc(sizeof(struct MultiClassTsetlinMachine *) * max_threads);
 	struct TsetlinMachine *tm = mc_tm->tsetlin_machines[0];
 
+	// Initialize per-clause locks for each class model to guard shared updates.
 	for (int i = 0; i < mc_tm->number_of_classes; i++) {
 		mc_tm->tsetlin_machines[i]->clause_lock = (omp_lock_t *)malloc(sizeof(omp_lock_t) * tm->number_of_clauses);
 		for (int j = 0; j < tm->number_of_clauses; ++j) {
@@ -239,6 +242,8 @@ void mc_tm_fit(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, 
 	for (int t = 0; t < max_threads; t++) {
 		mc_tm_thread[t] = CreateMultiClassTsetlinMachine(mc_tm->number_of_classes, tm->number_of_clauses, tm->number_of_features, tm->number_of_patches, tm->number_of_ta_chunks, tm->number_of_state_bits, tm->T, tm->s, tm->s_range, tm->boost_true_positive_feedback, tm->weighted_clauses);
 		for (int i = 0; i < mc_tm->number_of_classes; i++) {
+			// Replace thread-local buffers with shared parameters/weights from mc_tm.
+			// This lets each thread run with private scratch space but a shared model.
 			free(mc_tm_thread[t]->tsetlin_machines[i]->ta_state);
 			mc_tm_thread[t]->tsetlin_machines[i]->ta_state = mc_tm->tsetlin_machines[i]->ta_state;
 			free(mc_tm_thread[t]->tsetlin_machines[i]->clause_weights);
@@ -248,22 +253,26 @@ void mc_tm_fit(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, 
 		}	
 	}
 
+	// Train for the requested epochs; each example update is parallelized.
 	for (int epoch = 0; epoch < epochs; epoch++) {
 		#pragma omp parallel for
 		for (int l = 0; l < number_of_examples; l++) {
 			int thread_id = omp_get_thread_num();
 			unsigned int pos = l*step_size;
 
+			// Each thread updates through its wrapper into the shared locked model.
 			mc_tm_update(mc_tm_thread[thread_id], &X[pos], y[l]);
 		}
 	}
 
+	// Release lock objects after all parallel updates are completed.
 	for (int i = 0; i < mc_tm->number_of_classes; i++) {
 		for (int j = 0; j < tm->number_of_clauses; ++j) {
 			omp_destroy_lock(&mc_tm->tsetlin_machines[i]->clause_lock[j]);
 		}
 	}
 
+	// Free only thread-local scratch buffers; shared weights/state stay owned by mc_tm.
 	for (int t = 0; t < max_threads; t++) {
 		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {	
 
@@ -277,6 +286,7 @@ void mc_tm_fit(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, 
 		}
 	}
 
+	// clause_lock memory was allocated on the class models and shared across wrappers.
 	free(tm->clause_lock);
 	free(mc_tm_thread);
 }
@@ -614,161 +624,106 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
  */
  void mc_tm_fit_soft_nn(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs, float alpha)
  {
-    /*------------------------------------------------------------*/
-    /* Initialization and Setup                                   */
-    /*------------------------------------------------------------*/
-    // Calculate input data stride between consecutive examples
-    unsigned int step_size = mc_tm->number_of_patches * mc_tm->number_of_ta_chunks;
+	// One training example occupies one patch-vector per TA chunk.
+	unsigned int step_size = mc_tm->number_of_patches * mc_tm->number_of_ta_chunks;
 
-    // Get maximum available threads for parallel processing
-    int max_threads = omp_get_max_threads();
-    
-    // Allocate thread-local TM instances
-    struct MultiClassTsetlinMachine **mc_tm_thread = 
-        (void *)malloc(sizeof(struct MultiClassTsetlinMachine *) * max_threads);
-    struct TsetlinMachine *tm = mc_tm->tsetlin_machines[0];
-    
-    /*------------------------------------------------------------*/
-    /* Clause Lock Initialization                                 */
-    /*------------------------------------------------------------*/
-    // Initialize OpenMP locks for thread-safe clause updates
-    for (int i = 0; i < mc_tm->number_of_classes; i++) {
-        // Allocate array of locks (one per clause)
-        mc_tm->tsetlin_machines[i]->clause_lock = 
-            (omp_lock_t *)malloc(sizeof(omp_lock_t) * tm->number_of_clauses);
-        
-        // Initialize each lock
-        for (int j = 0; j < tm->number_of_clauses; ++j) {
-            omp_init_lock(&mc_tm->tsetlin_machines[i]->clause_lock[j]);
-        }
-    }
+	// Build thread-local wrappers while sharing the real model state.
+	int max_threads = omp_get_max_threads();
+	struct MultiClassTsetlinMachine **mc_tm_thread = (void *)malloc(sizeof(struct MultiClassTsetlinMachine *) * max_threads);
+	struct TsetlinMachine *tm = mc_tm->tsetlin_machines[0];
+    int number_of_classes = mc_tm->number_of_classes;
 
-    /*------------------------------------------------------------*/
-    /* Thread-Local TM Setup                                      */
-    /*------------------------------------------------------------*/
-    // Create thread-specific TM instances with shared state
-    for (int t = 0; t < max_threads; t++) {
-        // Create skeleton TM structure
-        mc_tm_thread[t] = CreateMultiClassTsetlinMachine(
-            mc_tm->number_of_classes, 
-            tm->number_of_clauses,
-            tm->number_of_features,
-            tm->number_of_patches,
-            tm->number_of_ta_chunks,
-            tm->number_of_state_bits,
-            tm->T,
-            tm->s,
-            tm->s_range,
-            tm->boost_true_positive_feedback,
-            tm->weighted_clauses
-        );
-        
-        // Share actual state between threads
-        for (int i = 0; i < mc_tm->number_of_classes; i++) {
-            // Share TA states
-            free(mc_tm_thread[t]->tsetlin_machines[i]->ta_state);
-            mc_tm_thread[t]->tsetlin_machines[i]->ta_state = 
-                mc_tm->tsetlin_machines[i]->ta_state;
-            
-            // Share clause weights
-            free(mc_tm_thread[t]->tsetlin_machines[i]->clause_weights);
-            mc_tm_thread[t]->tsetlin_machines[i]->clause_weights = 
-                mc_tm->tsetlin_machines[i]->clause_weights;
-            
-            // Share clause locks
-            mc_tm_thread[t]->tsetlin_machines[i]->clause_lock = 
-                mc_tm->tsetlin_machines[i]->clause_lock;
-        }    
-    }
+	// Initialize per-clause locks for each class model to guard shared updates.
+	for (int i = 0; i < number_of_classes; i++) {
+		mc_tm->tsetlin_machines[i]->clause_lock = (omp_lock_t *)malloc(sizeof(omp_lock_t) * tm->number_of_clauses);
+		for (int j = 0; j < tm->number_of_clauses; ++j) {
+			omp_init_lock(&mc_tm->tsetlin_machines[i]->clause_lock[j]);
+		}
+	}
 
-    /*------------------------------------------------------------*/
-    /* Main Training Loop                                         */
-    /*------------------------------------------------------------*/
-    for (int epoch = 0; epoch < epochs; epoch++) {
-        // Process examples in parallel using OpenMP
-        #pragma omp parallel for
-        for (int l = 0; l < number_of_examples; l++) {
-            // Get thread ID and example position
-            int thread_id = omp_get_thread_num();
-            unsigned int pos = l * step_size;
-            
-            // Get true class label for this example
+	for (int t = 0; t < max_threads; t++) {
+		mc_tm_thread[t] = CreateMultiClassTsetlinMachine(mc_tm->number_of_classes, tm->number_of_clauses, tm->number_of_features, tm->number_of_patches, tm->number_of_ta_chunks, tm->number_of_state_bits, tm->T, tm->s, tm->s_range, tm->boost_true_positive_feedback, tm->weighted_clauses);
+		for (int i = 0; i < mc_tm->number_of_classes; i++) {
+			// Replace thread-local buffers with shared parameters/weights from mc_tm.
+			// This lets each thread run with private scratch space but a shared model.
+			free(mc_tm_thread[t]->tsetlin_machines[i]->ta_state);
+			mc_tm_thread[t]->tsetlin_machines[i]->ta_state = mc_tm->tsetlin_machines[i]->ta_state;
+			free(mc_tm_thread[t]->tsetlin_machines[i]->clause_weights);
+			mc_tm_thread[t]->tsetlin_machines[i]->clause_weights = mc_tm->tsetlin_machines[i]->clause_weights;
+
+			mc_tm_thread[t]->tsetlin_machines[i]->clause_lock = mc_tm->tsetlin_machines[i]->clause_lock;
+		}	
+	}
+    /*
+    r ~ U[0,1]
+    if r >= alpha:
+        HARD BRANCH (probability 1-alpha)
+            +feedback to target_class
+            -feedback to ONE random non-target class    // matches mc_tm_update exactly
+    else:
+        SOFT BRANCH (probability alpha)
+            for each class i:
+                p = soft_labels[example, i]
+                if p > 1/K:  feedback_type = 1, prob = p
+                else:        feedback_type = 0, prob = 1 - p
+                with probability `prob`: tm_update(class i, X, feedback_type)
+
+    */
+
+	// Train for the requested epochs; each example update is parallelized.
+	for (int epoch = 0; epoch < epochs; epoch++) {
+		#pragma omp parallel for
+		for (int l = 0; l < number_of_examples; l++) {
+			int thread_id = omp_get_thread_num();
+			unsigned int pos = l*step_size;
+
             int target_class = y[l];
-            int number_of_classes = mc_tm->number_of_classes;
 
-            float scaled_probs[number_of_classes];
-            for (int i = 0; i < number_of_classes; i++) 
-                scaled_probs[i] = soft_labels[l * number_of_classes + i];
+            float r = (float)fast_rand() / FAST_RAND_MAX;
+
             
-            /*----------------------------------------------------*/
-            /* Hard Label (True Class) Training                   */
-            /*----------------------------------------------------*/
-            // Apply Type I feedback to true class with probability based on alpha
-            // This seems counterintuitive, but it works. Here's why:
-            // - student learns better from ambiguous examples
-            // - student mimics teacher better
-            // - can help with label noise
-            // - "dark" knowledge from teacher is preserved
-            tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], &X[pos], 1);
-            
-            /*----------------------------------------------------*/
-            /* Soft Label Training for All Classes                */
-            /*----------------------------------------------------*/
-            // Process ALL classes using soft labels
-            for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                // Skip true class if already trained with hard labels
-                if (i == target_class) continue;
-                
-                // Calculate base feedback probability based on soft label
-                float feedback_prob = scaled_probs[i];
-                
-                // No training if probability is too small
-                if (feedback_prob < 0.001) continue;
-                
-                // Determine if we should give positive or negative feedback
-                // For high probabilities from teacher, train with positive feedback (1)
-                // For low probabilities, train with negative feedback (0)
-                int feedback_type = 0;
-                if (scaled_probs[i] > (1.0/number_of_classes)) {
-                    feedback_type = 1;
-                } else {
-                    feedback_type = 0;
-                    feedback_prob = 1.0 - scaled_probs[i];
+            if (r >= alpha) {
+                tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], &X[pos], 1);
+                int negative_target_class = (int)number_of_classes * 1.0*rand()/((int)RAND_MAX + 1);
+                while (negative_target_class == target_class) {
+                    negative_target_class = (int)number_of_classes * 1.0*rand()/((int)RAND_MAX + 1);
                 }
-                
-                // Apply feedback with probability proportional to soft label strength
-                if ((float)fast_rand() / FAST_RAND_MAX <= (1.0 - alpha) * feedback_prob) {
-                    tm_update(mc_tm_thread[thread_id]->tsetlin_machines[i], 
-                             &X[pos], feedback_type);
+                tm_update(mc_tm_thread[thread_id]->tsetlin_machines[negative_target_class], &X[pos], 0);
+            } else {
+                for (int i = 0; i < number_of_classes; i++) {
+                    float p = soft_labels[l * number_of_classes + i];
+                    if (p > 1.0 / number_of_classes) {
+                        tm_update(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 1);
+                    } else {
+                        tm_update(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 0);
+                    }
                 }
             }
-        }
-    }
+		}
+	}
 
-    /*------------------------------------------------------------*/
-    /* Cleanup and Resource Release                               */
-    /*------------------------------------------------------------*/
-    // Destroy clause locks
-    for (int i = 0; i < mc_tm->number_of_classes; i++) {
-        for (int j = 0; j < tm->number_of_clauses; ++j) {
-            omp_destroy_lock(&mc_tm->tsetlin_machines[i]->clause_lock[j]);
-        }
-    }
+	// Release lock objects after all parallel updates are completed.
+	for (int i = 0; i < mc_tm->number_of_classes; i++) {
+		for (int j = 0; j < tm->number_of_clauses; ++j) {
+			omp_destroy_lock(&mc_tm->tsetlin_machines[i]->clause_lock[j]);
+		}
+	}
 
-    // Free thread-local TM instances
-    for (int t = 0; t < max_threads; t++) {
-        for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {    
-            struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
-            // Free temporary buffers while preserving shared state
-            free(tm_thread->clause_output);
-            free(tm_thread->output_one_patches);
-            free(tm_thread->feedback_to_la);
-            free(tm_thread->feedback_to_clauses);
-            free(tm_thread);
-        }
-    }
+	// Free only thread-local scratch buffers; shared weights/state stay owned by mc_tm.
+	for (int t = 0; t < max_threads; t++) {
+		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {	
 
-    // Final memory cleanup
-    free(tm->clause_lock);
-    free(mc_tm_thread);
- }
+			struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
+
+			free(tm_thread->clause_output);
+			free(tm_thread->output_one_patches);
+			free(tm_thread->feedback_to_la);
+			free(tm_thread->feedback_to_clauses);
+			free(tm_thread);
+		}
+	}
+
+	// clause_lock memory was allocated on the class models and shared across wrappers.
+	free(tm->clause_lock);
+	free(mc_tm_thread);
+}

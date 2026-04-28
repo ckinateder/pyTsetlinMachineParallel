@@ -359,37 +359,24 @@ class MultiClassTsetlinMachine():
 		_lib.mc_tm_predict_with_class_sums_2d(self.mc_tm, self.encoded_X, Y, class_sums, number_of_examples)
 		return Y, class_sums
 	
-	def get_soft_labels(self, X: np.ndarray) -> np.ndarray:
+	def get_soft_labels(self, X: np.ndarray, temperature: float = 1.0) -> np.ndarray:
 		"""
-		Get soft labels for each example in X.
-		THis is done by shifting the class sums to be non-negative, then normalizing by the max absolute value, and then applying softmax.
-		Example:
-		>>> soft_labels = tm.get_soft_labels(X)
-		>>> print(soft_labels)
-		[ 	[8.77e-02 1.02e-01 9.76e-02 1.07e-01 9.15e-02 1.01e-01 7.93e-02 9.13e-02 1.43e-01 9.92e-02]
-			[9.60e-02 9.65e-02 9.35e-02 1.00e-01 9.51e-02 1.01e-01 8.45e-02 1.36e-01 1.06e-01 9.24e-02]
-			[1.48e-01 9.17e-02 8.03e-02 9.63e-02 9.14e-02 1.04e-01 9.65e-02 9.21e-02 1.02e-01 9.79e-02]
-			[8.74e-02 1.44e-01 1.02e-01 9.28e-02 9.65e-02 1.04e-01 9.87e-02 8.50e-02 9.99e-02 9.02e-02]
-			[9.52e-02 9.04e-02 1.00e-01 9.21e-02 1.47e-01 1.11e-01 1.03e-01 8.62e-02 9.26e-02 8.26e-02]
-		 ....
-		]
+		Returns a soft probability distribution over classes for each example in X.
+
+		Class sums are range-normalized to [0, 1] then divided by temperature before
+		applying softmax. Range-normalization ensures temperature has consistent semantics
+		regardless of the scale of the TM's class sums. Higher temperature produces a
+		flatter distribution (more uncertainty), lower temperature produces a more peaked
+		one.
 		"""
 		Y, class_sums = self.predict_class_sums_2d(X)
-		
-		# shift class sums to be non-negative
-		class_sums_shifted = class_sums + np.abs(np.min(class_sums, axis=1, keepdims=True))
-		
-		# Handle potential division by zero 
-		max_abs_values = np.max(np.abs(class_sums_shifted), axis=1, keepdims=True)
-		
-		# Normalize class sums by max absolute value
-		class_sums_normalized = class_sums_shifted / max_abs_values
-				
-		# Regular softmax
-		probs = np.exp(class_sums_normalized)
-		soft_labels_shifted = probs / np.sum(probs, axis=1, keepdims=True)
-
-		return soft_labels_shifted
+		# Range-normalize to [0, 1] so temperature has consistent semantics
+		# regardless of the magnitude of class sums, then apply temperature scaling
+		x = (class_sums - class_sums.min(axis=1, keepdims=True)).astype(np.float64)
+		x /= x.max(axis=1, keepdims=True) + 1e-8
+		x /= temperature
+		probs = np.exp(x)
+		return probs / probs.sum(axis=1, keepdims=True)
 	
 	def ta_state(self, mc_tm_class, clause, ta):
 		return _lib.mc_tm_ta_state(self.mc_tm, mc_tm_class, clause, ta)
@@ -465,13 +452,14 @@ class MultiClassTsetlinMachine():
 
 		Xm = np.ascontiguousarray(X.flatten()).astype(np.uint32)
 		Ym = np.ascontiguousarray(Y).astype(np.uint32)
-		Softm = np.ascontiguousarray(soft_labels).astype(np.float32)
+
+		Softm = np.ascontiguousarray(soft_labels.astype(np.float32))
 
 		if self.append_negated:
 			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features//2, 1, 1, self.number_of_features//2, 1, 1)
 		else:
 			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
-		
+
 		_lib.mc_tm_fit_soft(self.mc_tm, self.encoded_X, Ym, Softm, number_of_examples, epochs, alpha, temperature)
 
 		return

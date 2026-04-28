@@ -114,14 +114,15 @@ if __name__ == "__main__":
 
     print("\nInitializing student from teacher and generating soft labels...")
     student.init_from_teacher(best_teacher, x_train, y_train, clauses_per_class=STUDENT_PARAMS["C"], z=Z)
-    soft_labels = best_teacher.get_soft_labels(x_train)
+    soft_labels = best_teacher.get_soft_labels(x_train, temperature=TEMPERATURE)
 
     print("\nTraining student with KD...")
     student_acc = train_model(
         "Student", student, STUDENT_PARAMS["epochs"], x_train, y_train, x_test, y_test, soft_labels=soft_labels
     )
 
+    avg_period = round((TEACHER_PARAMS["epochs"] + STUDENT_PARAMS["epochs"]) / 10)
     print("\nFinal test accuracy:")
-    print(f"Teacher (best over {TEACHER_PARAMS['epochs']} epochs): {best_teacher_acc:.2f}%")
-    print(f"Baseline (last epoch): {baseline_acc[-1]:.2f}%")
-    print(f"Student KD (last epoch): {student_acc[-1]:.2f}%")
+    print(f"Teacher (avg last {avg_period} epochs): {np.mean(teacher_acc[-avg_period:]):.2f}%")
+    print(f"Baseline (avg last {avg_period} epochs): {np.mean(baseline_acc[-avg_period:]):.2f}%")
+    print(f"Student KD (avg last {avg_period} epochs): {np.mean(student_acc[-avg_period:]):.2f}%")

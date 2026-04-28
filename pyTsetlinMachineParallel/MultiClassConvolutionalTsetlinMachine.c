@@ -395,24 +395,16 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
 	
 	return;
 }
-// Add new function for soft label training
 /*
- * This function implements knowledge distillation for Tsetlin Machines using soft labels.
- * 
- * Parameters:
- * - mc_tm: Pointer to the multi-class Tsetlin Machine to be trained
- * - X: Input data
- * - y: True class labels
- * - soft_labels: Probability distribution from teacher model (already temperature-scaled)
- * - number_of_examples: Number of training examples
- * - epochs: Number of training epochs
- * - alpha: Balance between hard and soft labels (0.0 = all soft, 1.0 = all hard)
- * - temperature: Controls additional temperature scaling for training dynamics
- *   - Higher values make the system more sensitive to teacher confidences
- *   - A temperature around 2-4 works well for most cases
- *   - This parameter is used to sharpen/soften the teacher's probability distribution
+ * Knowledge distillation training using pre-scaled soft labels from a teacher model.
+ *
+ * soft_labels: already temperature-scaled probabilities from get_soft_labels() in Python.
+ * alpha:       probability of using hard label feedback for the true class (0=all soft, 1=all hard).
+ * temperature: scales the feedback probability multiplier (1 + (1-sp)*T) — higher values
+ *              give more aggressive negative feedback to low-probability classes.
+ *              Label shaping is handled in Python via get_soft_labels(), not here.
  */
-void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, float *feedback_multipliers, int number_of_examples, int epochs, float alpha)
+void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs, float alpha, float temperature)
 {
     /*------------------------------------------------------------*/
     /* Initialization and Setup                                   */
@@ -521,16 +513,11 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
                 float sp = soft_labels[l * mc_tm->number_of_classes + i];
                 float feedback_prob = (1.0 - alpha) * sp;
 
-                // No training if probability is too small
-                if (feedback_prob < 0.001) continue;
-
-                int feedback_type = (sp > 0.5) ? 1 : 0;
-                feedback_prob *= feedback_multipliers[l * mc_tm->number_of_classes + i];
+                feedback_prob *= (1.0f + (1.0f - sp) * temperature);
                 
                 // Apply feedback with probability proportional to soft label strength
                 if ((float)fast_rand() / FAST_RAND_MAX <= feedback_prob) {
-                    tm_update(mc_tm_thread[thread_id]->tsetlin_machines[i], 
-                             &X[pos], feedback_type);
+                    tm_update(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 0);
                 }
             }
         }

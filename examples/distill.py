@@ -8,8 +8,8 @@ from torchvision.datasets import MNIST
 from tqdm import tqdm
 
 
-TEACHER_PARAMS = {"C": 1000, "T": 10, "s": 4.0, "epochs": 20}
-STUDENT_PARAMS = {"C": 100, "T": 10, "s": 4.0, "epochs": 40}
+TEACHER_PARAMS = {"C": 1000, "T": 20, "s": 4.0, "epochs": 20}
+STUDENT_PARAMS = {"C": 100, "T": 20, "s": 4.0, "epochs": 40}
 TEMPERATURE = 3.0
 ALPHA = 0.5
 Z = 0.3
@@ -113,7 +113,7 @@ if __name__ == "__main__":
     )
 
     print("\nInitializing student from teacher and generating soft labels...")
-    student.init_from_teacher(best_teacher, x_train, y_train, clauses_per_class=STUDENT_PARAMS["C"], z=Z)
+    #student.init_from_teacher(best_teacher, x_train, y_train, clauses_per_class=STUDENT_PARAMS["C"], z=Z)
     soft_labels = best_teacher.get_soft_labels(x_train, temperature=TEMPERATURE)
 
     print("\nTraining student with KD...")

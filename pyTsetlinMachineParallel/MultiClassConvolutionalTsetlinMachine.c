@@ -104,10 +104,10 @@ void mc_tm_predict(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int 
 
 		unsigned int pos = l*step_size;
 		// Identify class with largest output
-		int max_class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[0], &X[pos], 1);
+		float max_class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[0], &X[pos], 1);
 		int max_class = 0;
 		for (int i = 0; i < mc_tm_thread[thread_id]->number_of_classes; i++) {	
-			int class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 1);
+			float class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 1);
 			if (max_class_sum < class_sum) {
 				max_class_sum = class_sum;
 				max_class = i;
@@ -141,7 +141,7 @@ void mc_tm_predict(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int 
 /*** THERE IS NO CLAMPING HERE ***/
 /***********************************/
 
-void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, int *class_sums, int number_of_examples)
+void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *class_sums, int number_of_examples)
 {
 
 	unsigned int step_size = mc_tm->number_of_patches * mc_tm->number_of_ta_chunks;
@@ -164,10 +164,10 @@ void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, un
 
 		unsigned int pos = l*step_size;
 		// Identify class with largest output
-		int max_class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[0], &X[pos], 0);
+		float max_class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[0], &X[pos], 0);
 		int max_class = 0;
 		for (int i = 0; i < mc_tm_thread[thread_id]->number_of_classes; i++) {	
-			int class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 0);
+			float class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 0);
 			if (max_class_sum < class_sum) {
 				max_class_sum = class_sum;
 				max_class = i;
@@ -300,16 +300,16 @@ void mc_tm_clause_configuration(struct MultiClassTsetlinMachine *mc_tm, int clas
 	return;
 }
 
-int mc_tm_clause_weight(struct MultiClassTsetlinMachine *mc_tm, int class, int clause)
+float mc_tm_clause_weight(struct MultiClassTsetlinMachine *mc_tm, int class, int clause)
 {
-	return(mc_tm->tsetlin_machines[class]->clause_weights[clause]);
+	return mc_tm->tsetlin_machines[class]->clause_weights[clause];
 }
 
 /*****************************************************/
 /*** Storing and Loading of Tsetlin Machine State ****/
 /*****************************************************/
 
-void mc_tm_get_state(struct MultiClassTsetlinMachine *mc_tm, int class, unsigned int *clause_weights, unsigned int *ta_state)
+void mc_tm_get_state(struct MultiClassTsetlinMachine *mc_tm, int class, float *clause_weights, unsigned int *ta_state)
 {
 	tm_get_ta_state(mc_tm->tsetlin_machines[class], ta_state);
 	tm_get_clause_weights(mc_tm->tsetlin_machines[class], clause_weights);
@@ -317,7 +317,7 @@ void mc_tm_get_state(struct MultiClassTsetlinMachine *mc_tm, int class, unsigned
 	return;
 }
 
-void mc_tm_set_state(struct MultiClassTsetlinMachine *mc_tm, int class, unsigned int *clause_weights, unsigned int *ta_state)
+void mc_tm_set_state(struct MultiClassTsetlinMachine *mc_tm, int class, float *clause_weights, unsigned int *ta_state)
 {
 	tm_set_ta_state(mc_tm->tsetlin_machines[class], ta_state);
 	tm_set_clause_weights(mc_tm->tsetlin_machines[class], clause_weights);

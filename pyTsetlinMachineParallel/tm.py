@@ -296,6 +296,41 @@ class MultiClassTsetlinMachine():
 		if self.itm != None:
 			_lib.itm_destroy(self.itm)
 
+	def get_clause_weights(self, class_idx=None):
+		"""
+		Get clause weights.
+
+		Parameters:
+		- class_idx: Optional class index. If None, returns a list of weights for all classes.
+
+		Returns:
+		- np.ndarray for one class, or list[np.ndarray] for all classes.
+		"""
+		state = self.get_state()
+		if class_idx is None:
+			return np.array([class_state[0].copy() for class_state in state])
+		return state[class_idx][0].copy()
+
+	def set_clause_weights(self, weights):
+		"""
+		Set clause weights while preserving TA states.
+
+		Parameters:
+		- weights: New clause weights.
+			* If class_idx is not None, expected shape is (number_of_clauses,).
+			* If class_idx is None, expected shape is (number_of_classes, number_of_clauses)
+			  or a list with one weight vector per class.
+		- class_idx: Optional class index. If None, sets weights for all classes.
+		"""
+		state = self.get_state()
+
+		assert len(weights) == self.number_of_classes, "Expected one weight vector per class."
+		for i in range(self.number_of_classes):
+			cw = np.ascontiguousarray(np.asarray(weights[i], dtype=np.float32))
+			assert cw.shape[0] == self.number_of_clauses, "Each class weight vector must match number_of_clauses."
+			state[i] = (cw, state[i][1])
+
+		self.set_state(state)
 	def fit(self, X, Y, epochs=100, incremental=False):
 		number_of_examples = X.shape[0]
 
@@ -746,6 +781,7 @@ class MultiClassTsetlinMachine():
 						return False  # Literal doesn't match input
 					
 		return True  # All included literals match
+
 
 class RegressionTsetlinMachine():
 	def __init__(self, number_of_clauses, T, s, boost_true_positive_feedback=1, number_of_state_bits=8, weighted_clauses=False, s_range=False):

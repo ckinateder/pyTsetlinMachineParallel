@@ -187,9 +187,8 @@ def train_log_weight_head(
 
             # compute loss
             loss = F.cross_entropy(logits, yb)
-            weight_penalty = l2_weight * (model.weights ** 2).mean()
-
-            loss = loss + weight_penalty
+            #weight_penalty = l2_weight * (model.weights ** 2).mean()
+            #loss = loss + weight_penalty
 
             # zero gradients
             optimizer.zero_grad()
@@ -227,8 +226,8 @@ if __name__ == "__main__":
     np.random.seed(0)
     random.seed(0)
 
-    C = 800
-    T = 200
+    C = 1000
+    T = 250
     s = 4.0
     number_of_state_bits = 8
     weighted_clauses = False
@@ -277,8 +276,9 @@ if __name__ == "__main__":
 
     # scale weights so TM clamp never activates, then write back
     scaled_weights = scale_weights_for_tm(nn_model, Z_test, weighted_tm.T)
+    print(f"Scaled weights range: {scaled_weights.min():.2f} to {scaled_weights.max():.2f}, mean: {scaled_weights.mean():.2f}")
     weighted_tm.set_clause_weights(scaled_weights)
-    print(f"Weighted TM test accuracy: {100.0 * (weighted_tm.predict(x_test) == y_test).mean():.2f}%")
+    print(f"Weighted TM (with NN weights) test accuracy: {100.0 * (weighted_tm.predict(x_test) == y_test).mean():.2f}%")
     
     
     # now do the same for unweighted TM
@@ -287,8 +287,9 @@ if __name__ == "__main__":
     
     nn_model = LogWeightHead(n_classes=10, n_clauses=unweighted_tm.number_of_clauses, T=unweighted_tm.T)
 
-    nn_results = train_log_weight_head(nn_model, Z_train, y_train, Z_test, y_test, n_classes=10, n_clauses=unweighted_tm.number_of_clauses, epochs=150)
+    nn_results = train_log_weight_head(nn_model, Z_train, y_train, Z_test, y_test, n_classes=10, n_clauses=unweighted_tm.number_of_clauses, epochs=150, patience=20)
     nn_results.print_results()
     scaled_weights = scale_weights_for_tm(nn_model, Z_test, unweighted_tm.T)
+    print(f"Scaled weights range: {scaled_weights.min():.2f} to {scaled_weights.max():.2f}, mean: {scaled_weights.mean():.2f}")
     unweighted_tm.set_clause_weights(scaled_weights)
     print(f"Unweighted TM (with NN weights) test accuracy: {100.0 * (unweighted_tm.predict(x_test) == y_test).mean():.2f}%")

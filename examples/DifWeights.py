@@ -226,7 +226,12 @@ if __name__ == "__main__":
     np.random.seed(0)
     random.seed(0)
 
-    C = 500
+    """
+    Findings:
+    - at all clause levels, using the NN on top of the TM gives significant higher accuracy than the TM alone
+    """
+
+    C = 200
     T = C // 4
     s = 4.0
     number_of_state_bits = 8
@@ -238,16 +243,18 @@ if __name__ == "__main__":
     ## ----------------------------------------
     print("----------------------------------------")
     print("Alternating TM/NN Training")
-    print("----------------------------------------")
+    print("----------------------------------------\n")
 
     # Alternate training between weighted Tsetlin Machine and neural network head
-    rounds = 20
-    epochs_per_round = 10
-    print("Initializing alternating TM with weighted clauses (C={C}, T={T}, s={s})")
+    rounds = 15
+    epochs_per_round = 15
+    print(f"Initializing alternating TM with weighted clauses (C={C}, T={T}, s={s})")
+    print(f"The TM is trained for {epochs_per_round} epochs per round, then\nthe NN is trained for {epochs_per_round} epochs on the TM-transformed features.\nThen the TM+NN accuracy is tested on the test set.")
     alternating_tm = MultiClassTsetlinMachine(
         C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True
     )
-    print(f"{'Epoch':<3} | {'TM Acc':<5} | {'NN Acc':<5} | {'Scaled TM Acc':<5}")
+    print("----------------------------------------------------")
+    print(f"{'Epoch':<10} | {'TM Acc':<10} | {'NN Acc':<10} | {'TM + NN Acc':<10}")
     print("----------------------------------------------------")
     pbar = tqdm(
         range(rounds), desc="Alternating TM/NN Training", dynamic_ncols=True, leave=False
@@ -283,11 +290,14 @@ if __name__ == "__main__":
         final_scaled_tm_acc = 100.0 * (alternating_tm.predict(x_test) == y_test).mean()
 
         # the final scaled TM accuracy is the best we can do with the current TM and NN, and thats what we can copy to the TM
-        tqdm.write(f"{epoch+1:<10} | {alternating_results.test_accuracy[-1]:<10.2f} | {nn_results.test_accuracy[-1]:<10.2f} | {final_scaled_tm_acc:<10.2f}")
+        tqdm.write(f"{(epoch+1)*epochs_per_round:<10} | {alternating_results.test_accuracy[-1]:<10.2f} | {nn_results.test_accuracy[-1]:<10.2f} | {final_scaled_tm_acc:<10.2f}")
 
         # Update TM clause weights from trained neural net - NOT scaled
         new_weights = nn_model.weights.detach().cpu().numpy()
         alternating_tm.set_clause_weights(new_weights)
+    pbar.close()
+
+    print()
 
     # Train unweighted TM and save to pickle
     unweighted_tm_path = f"unweighted_tm_C{C}_T{T}_s{s}.pkl"
@@ -318,7 +328,7 @@ if __name__ == "__main__":
     print(f"{'Method':<15} | {'Test Accuracy':<15}")
     print(f"{'Weighted TM':<15} | {100.0 * (weighted_tm.predict(x_test) == y_test).mean():.2f}%")
     print(f"{'Unweighted TM':<15} | {100.0 * (unweighted_tm.predict(x_test) == y_test).mean():.2f}%")
-    print(f"{'Alternating TM':<15} | {100.0 * (alternating_tm.predict(x_test) == y_test).mean():.2f}%")
+    print(f"{'Alternating TM + NN':<15} | {100.0 * (alternating_tm.predict(x_test) == y_test).mean():.2f}%")
 
     ## ----------------------------------------
     print("----------------------------------------")

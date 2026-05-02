@@ -247,9 +247,8 @@ if __name__ == "__main__":
     alternating_tm = MultiClassTsetlinMachine(
         C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True
     )
-    print(f"TM Acc @ 1 : 96.13% | NN Acc @ 1 : 96.75% | Scaled TM Acc @ 1 : 96.94%")
-    print(f"{'Epoch':<10} | {'TM Acc':<10} | {'NN Acc':<10} | {'Scaled TM Acc':<10}")
-    print("-" * 40)
+    print(f"{'Epoch':<3} | {'TM Acc':<5} | {'NN Acc':<5} | {'Scaled TM Acc':<5}")
+    print("----------------------------------------------------")
     pbar = tqdm(
         range(rounds), desc="Alternating TM/NN Training", dynamic_ncols=True, leave=False
     )
@@ -284,7 +283,7 @@ if __name__ == "__main__":
         final_scaled_tm_acc = 100.0 * (alternating_tm.predict(x_test) == y_test).mean()
 
         # the final scaled TM accuracy is the best we can do with the current TM and NN, and thats what we can copy to the TM
-        tqdm.write(f"{epoch+1:<3} | {alternating_results.test_accuracy[-1]:<10.2f}% | {nn_results.test_accuracy[-1]:<10.2f}% | {final_scaled_tm_acc:<10.2f}%")
+        tqdm.write(f"{epoch+1:<10} | {alternating_results.test_accuracy[-1]:<10.2f} | {nn_results.test_accuracy[-1]:<10.2f} | {final_scaled_tm_acc:<10.2f}")
 
         # Update TM clause weights from trained neural net - NOT scaled
         new_weights = nn_model.weights.detach().cpu().numpy()

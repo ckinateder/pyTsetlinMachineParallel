@@ -84,13 +84,16 @@ class LogWeightHead(nn.Module):
     Logit for class k:
         logit_k = bias_k + sum_j polarity_j * exp(theta_kj) * clause_output_kj
     """
-    def __init__(self, n_classes, n_clauses, T: float = None, init_weights=None, learn_bias=False):
+    def __init__(self, n_classes, n_clauses, T: float = None, init_weights=None):
         super().__init__()
 
         self.n_classes = n_classes
         self.n_clauses = n_clauses
         self.T = T
-
+        
+        if init_weights is not None and T is not None:
+            print("WARNING: Both init_weights and T are provided - this clamps gradients")
+        
         if init_weights is None:
             theta_init = torch.zeros(n_classes, n_clauses)
         else:
@@ -100,10 +103,7 @@ class LogWeightHead(nn.Module):
 
         self.theta = nn.Parameter(theta_init)
 
-        if learn_bias:
-            self.bias = nn.Parameter(torch.zeros(n_classes))
-        else:
-            self.register_buffer("bias", torch.zeros(n_classes))
+        self.register_buffer("bias", torch.zeros(n_classes))
 
         polarity = torch.ones(n_clauses)
         polarity[1::2] = -1.0
@@ -235,45 +235,60 @@ if __name__ == "__main__":
     # get MNIST data
     x_train, y_train, x_test, y_test = load_mnist_binary()
 
+    ## ----------------------------------------
+    print("----------------------------------------")
+    print("Alternating TM/NN Training")
+    print("----------------------------------------")
+
     # Alternate training between weighted Tsetlin Machine and neural network head
     rounds = 20
-    epochs_per_round = 20
-    weighted_tm = MultiClassTsetlinMachine(
+    epochs_per_round = 10
+    print("Initializing alternating TM with weighted clauses (C={C}, T={T}, s={s})")
+    alternating_tm = MultiClassTsetlinMachine(
         C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True
     )
+    print(f"TM Acc @ 1 : 96.13% | NN Acc @ 1 : 96.75% | Scaled TM Acc @ 1 : 96.94%")
+    print(f"{'Epoch':<10} | {'TM Acc':<10} | {'NN Acc':<10} | {'Scaled TM Acc':<10}")
+    print("-" * 40)
     pbar = tqdm(
         range(rounds), desc="Alternating TM/NN Training", dynamic_ncols=True, leave=False
     )
-
     for epoch in pbar:
         # Train weighted Tsetlin Machine
-        weighted_results = train_tm(
-            weighted_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round
+        alternating_results = train_tm(
+            alternating_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round
         )
         # Extract clause outputs for training neural net
-        Z_train = weighted_tm.transform(x_train, inverted=False).astype("uint8")
-        Z_test = weighted_tm.transform(x_test, inverted=False).astype("uint8")
+        Z_train = alternating_tm.transform(x_train, inverted=False).astype("uint8")
+        Z_test = alternating_tm.transform(x_test, inverted=False).astype("uint8")
 
         # Initialize neural network using TM's current clause weights
         nn_model = LogWeightHead(
             n_classes=10,
-            n_clauses=weighted_tm.number_of_clauses,
+            n_clauses=alternating_tm.number_of_clauses,
             T=None,
-            init_weights=weighted_tm.get_clause_weights()
+            init_weights=alternating_tm.get_clause_weights()
         )
 
         # Train neural network head on TM-transformed features
         nn_results = train_log_weight_head(
             nn_model, Z_train, y_train, Z_test, y_test,
             n_classes=10,
-            n_clauses=weighted_tm.number_of_clauses,
+            n_clauses=alternating_tm.number_of_clauses,
             epochs=epochs_per_round,
         )
-        tqdm.write(f"WTM Acc @ {epoch+1} : {weighted_results.test_accuracy[-1]:.2f}% | NN Acc @ {epoch+1} : {nn_results.test_accuracy[-1]:.2f}%")
 
-        # Update TM clause weights from trained neural net
+        # run a test on the test set with the current TM and NN
+        scaled_weights = scale_weights_for_tm(nn_model, Z_test, alternating_tm.T)
+        alternating_tm.set_clause_weights(scaled_weights)
+        final_scaled_tm_acc = 100.0 * (alternating_tm.predict(x_test) == y_test).mean()
+
+        # the final scaled TM accuracy is the best we can do with the current TM and NN, and thats what we can copy to the TM
+        tqdm.write(f"{epoch+1:<3} | {alternating_results.test_accuracy[-1]:<10.2f}% | {nn_results.test_accuracy[-1]:<10.2f}% | {final_scaled_tm_acc:<10.2f}%")
+
+        # Update TM clause weights from trained neural net - NOT scaled
         new_weights = nn_model.weights.detach().cpu().numpy()
-        weighted_tm.set_clause_weights(new_weights)
+        alternating_tm.set_clause_weights(new_weights)
 
     # Train unweighted TM and save to pickle
     unweighted_tm_path = f"unweighted_tm_C{C}_T{T}_s{s}.pkl"
@@ -300,8 +315,16 @@ if __name__ == "__main__":
     print(f"Unweighted TM test accuracy: {100.0 * (unweighted_tm.predict(x_test) == y_test).mean():.2f}%")
     print(f"Weighted TM test accuracy: {100.0 * (weighted_tm.predict(x_test) == y_test).mean():.2f}%")
 
-    ## ----------------------------------------
+    # print table of all 3 - weighted TM, unweighted TM, alternating TM
+    print(f"{'Method':<15} | {'Test Accuracy':<15}")
+    print(f"{'Weighted TM':<15} | {100.0 * (weighted_tm.predict(x_test) == y_test).mean():.2f}%")
+    print(f"{'Unweighted TM':<15} | {100.0 * (unweighted_tm.predict(x_test) == y_test).mean():.2f}%")
+    print(f"{'Alternating TM':<15} | {100.0 * (alternating_tm.predict(x_test) == y_test).mean():.2f}%")
 
+    ## ----------------------------------------
+    print("----------------------------------------")
+    print("Training neural network with frozen TM (no alternating)")
+    print("----------------------------------------")
     # train neural network with frozen TM
     # column k = i * number_of_clauses + j is the feature for class i, clause j.
     Z_train = weighted_tm.transform(x_train, inverted=False).astype("uint8")

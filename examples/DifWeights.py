@@ -216,7 +216,7 @@ def train_log_weight_head(
             pbar.set_postfix(acc=f"{acc:.2f}%", loss=f"{loss.item():.2f}")
 
         if epochs_no_improve >= patience:
-            tqdm.write(f"Early stopping at epoch {epoch + 1} (no improvement for {patience} epochs)")
+            #tqdm.write(f"Early stopping at epoch {epoch + 1} (no improvement for {patience} epochs)")
             break
 
     model.theta.data.copy_(best_theta)
@@ -229,9 +229,13 @@ if __name__ == "__main__":
     """
     Findings:
     - at all clause levels, using the NN on top of the TM gives significant higher accuracy than the TM alone
+    - low and high clause levels
+    - alternating TM/NN is better than frozen TM at base
+    - Good results at C=50, T=12.5, s=4.0, 15 rounds of 15. Also with C=20, T=5, s=3.0, 15 rounds of 15.
+    - Gains are higher at low clause levels, marginal at high clause levels
     """
 
-    C = 200
+    C = 20
     T = C // 4
     s = 4.0
     number_of_state_bits = 8
@@ -328,7 +332,7 @@ if __name__ == "__main__":
     print(f"{'Method':<15} | {'Test Accuracy':<15}")
     print(f"{'Weighted TM':<15} | {100.0 * (weighted_tm.predict(x_test) == y_test).mean():.2f}%")
     print(f"{'Unweighted TM':<15} | {100.0 * (unweighted_tm.predict(x_test) == y_test).mean():.2f}%")
-    print(f"{'Alternating TM + NN':<15} | {100.0 * (alternating_tm.predict(x_test) == y_test).mean():.2f}%")
+    print(f"{'Alting TM + NN':<15} | {100.0 * (alternating_tm.predict(x_test) == y_test).mean():.2f}%")
 
     ## ----------------------------------------
     print("----------------------------------------")

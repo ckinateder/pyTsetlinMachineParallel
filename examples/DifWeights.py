@@ -222,6 +222,102 @@ def train_log_weight_head(
     model.theta.data.copy_(best_theta)
     return TrainingResults(test_accuracy, test_time, train_time)
 
+def run_experiment(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    C: int,
+    T: int,
+    s: float,
+    rounds: int,
+    epochs_per_round: int,
+    save_path: str,
+):
+    """
+    Run experiment with given parameters. This will compare the following methods:
+    - Unweighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
+    - Weighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
+    - Frozen weighted TM trained for rounds*epochs_per_round / 2 epochs, then NN trained on top of that for rounds*epochs_per_round / 2 epochs
+    - Frozen unweighted TM trained for rounds*epochs_per_round / 2 epochs, then NN trained on top of that for rounds*epochs_per_round / 2 epochs
+    - Alternating TM/NN for rounds*epochs_per_round epochs. Start with unweighted TM, then alternate between weighted TM and NN. Each round, NN
+        is initialized with the weights of the TM from that round, then trained for epochs_per_round epochs, then the TM is updated with the weights of the NN.
+    
+    We will track
+    - Accuracy of each method on the test set at each epoch
+    - Time per epoch for each method
+
+    I'm not yet sure exactly how to output the alternating TM/NN results in a graph-friendly way.
+
+    TODO:
+    - get rid of the training results struct and switch to list of dictionaries
+    """
+    # make save path if it doesn't exist
+    os.makedirs(save_path, exist_ok=True)
+    unweighted_tm_path = os.path.join(save_path, f"unweighted_tm_C{C}_T{T}_s{s}.pkl")
+    weighted_tm_path = os.path.join(save_path, f"weighted_tm_C{C}_T{T}_s{s}.pkl")
+    total_epochs = rounds * epochs_per_round
+
+    # train unweighted TM
+    unweighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=False)
+    unweighted_results = train_tm(unweighted_tm, x_train, y_train, x_test, y_test, epochs=total_epochs)
+
+    # train weighted TM
+    weighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True)
+    weighted_results = train_tm(weighted_tm, x_train, y_train, x_test, y_test, epochs=total_epochs)
+
+    # train frozen weighted TM
+    frozen_weighted_tm = pkl.load(open(weighted_tm_path, "rb"))
+    frozen_weighted_results = train_tm(frozen_weighted_tm, x_train, y_train, x_test, y_test, epochs=total_epochs // 2)
+
+    # train frozen unweighted TM
+    frozen_unweighted_tm = pkl.load(open(unweighted_tm_path, "rb"))
+    frozen_unweighted_results = train_tm(frozen_unweighted_tm, x_train, y_train, x_test, y_test, epochs=total_epochs // 2)
+    
+    alternating_tm = MultiClassTsetlinMachine(
+        C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True
+    )
+    pbar = tqdm(
+        range(rounds), desc="Alternating TM/NN Training", dynamic_ncols=True, leave=False
+    )
+    for epoch in pbar:
+        # Train weighted Tsetlin Machine
+        alternating_results = train_tm(
+            alternating_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round
+        )
+        # Extract clause outputs for training neural net
+        Z_train = alternating_tm.transform(x_train, inverted=False).astype("uint8")
+        Z_test = alternating_tm.transform(x_test, inverted=False).astype("uint8")
+
+        # Initialize neural network using TM's current clause weights
+        nn_model = LogWeightHead(
+            n_classes=10,
+            n_clauses=alternating_tm.number_of_clauses,
+            T=None,
+            init_weights=alternating_tm.get_clause_weights()
+        )
+
+        # Train neural network head on TM-transformed features
+        nn_results = train_log_weight_head(
+            nn_model, Z_train, y_train, Z_test, y_test,
+            n_classes=10,
+            n_clauses=alternating_tm.number_of_clauses,
+            epochs=epochs_per_round,
+        )
+
+        # run a test on the test set with the current TM and NN
+        scaled_weights = scale_weights_for_tm(nn_model, Z_test, alternating_tm.T)
+        alternating_tm.set_clause_weights(scaled_weights)
+        final_scaled_tm_acc = 100.0 * (alternating_tm.predict(x_test) == y_test).mean()
+
+        # the final scaled TM accuracy is the best we can do with the current TM and NN, and thats what we can copy to the TM
+        tqdm.write(f"{(epoch+1)*epochs_per_round:<10} | {alternating_results.test_accuracy[-1]:<10.2f} | {nn_results.test_accuracy[-1]:<10.2f} | {final_scaled_tm_acc:<10.2f}")
+
+        # Update TM clause weights from trained neural net - NOT scaled
+        new_weights = nn_model.weights.detach().cpu().numpy()
+        alternating_tm.set_clause_weights(new_weights)
+    pbar.close()
+
 if __name__ == "__main__":
     np.random.seed(0)
     random.seed(0)
@@ -235,7 +331,7 @@ if __name__ == "__main__":
     - Gains are higher at low clause levels, marginal at high clause levels
     """
 
-    C = 20
+    C = 700
     T = C // 4
     s = 4.0
     number_of_state_bits = 8
@@ -250,7 +346,7 @@ if __name__ == "__main__":
     print("----------------------------------------\n")
 
     # Alternate training between weighted Tsetlin Machine and neural network head
-    rounds = 15
+    rounds = 10
     epochs_per_round = 15
     print(f"Initializing alternating TM with weighted clauses (C={C}, T={T}, s={s})")
     print(f"The TM is trained for {epochs_per_round} epochs per round, then\nthe NN is trained for {epochs_per_round} epochs on the TM-transformed features.\nThen the TM+NN accuracy is tested on the test set.")

@@ -8,3 +8,5 @@ build
 data
 CLAUDE.md
 settings.local.json
+.venv/
+results

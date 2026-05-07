@@ -480,7 +480,8 @@ def plot_results(
         ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
         ax.set_ylabel(ylabel)
         ax.set_title(title)
-        ax.grid(True, alpha=0.3, axis="y", zorder=0)
+        ax.set_axisbelow(True)
+        ax.grid(True, alpha=0.3, axis="y")
         for bar, v in zip(bars, values):
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
                     fmt.format(v), ha="center", va="bottom", fontsize=9)
@@ -506,6 +507,33 @@ def plot_results(
     print(f"Saved plot to {out_path}")
     plt.close()
 
+@dataclass
+class ExperimentConfig:
+    C: int
+    T: int
+    s: float
+    number_of_state_bits: int
+    rounds: int
+    epochs_per_round: int
+    split_point: float
+    dataset_name: str
+    train_dataset: Dataset
+    test_dataset: Dataset
+    save_path: str
+    def run(self):
+        x_train, y_train, x_test, y_test = binarize_dataset(self.train_dataset, self.test_dataset)
+        per_epoch_df, summary_df = run_experiment(
+            x_train, y_train, x_test, y_test,
+            C=self.C, T=self.T, s=self.s,
+            number_of_state_bits=self.number_of_state_bits,
+            rounds=self.rounds,
+            epochs_per_round=self.epochs_per_round,
+            split_point=self.split_point,
+            dataset_name=self.dataset_name,
+            save_path=self.save_path,
+        )
+        return per_epoch_df, summary_df
+
 
 if __name__ == "__main__":
     np.random.seed(0)
@@ -520,7 +548,7 @@ if __name__ == "__main__":
     - Gains are higher at low clause levels, marginal at high clause levels
     """
 
-    C = 100
+    C = 500
     T = C // 4
     s = 4.0
     number_of_state_bits = 8
@@ -531,24 +559,25 @@ if __name__ == "__main__":
     train = FashionMNIST(root="data", train=True, download=True)
     test = FashionMNIST(root="data", train=False, download=True)
     dataset_name = "FashionMNIST"
-    train = EMNIST(root="data", train=True, download=True, split="letters")
-    test = EMNIST(root="data", train=False, download=True, split="letters")
-    dataset_name = "EMNIST-letters"
     train = MNIST(root="data", train=True, download=True)
     test = MNIST(root="data", train=False, download=True)
     dataset_name = "MNIST-1"
+    train = KMNIST(root="data", train=True, download=True)
+    test = KMNIST(root="data", train=False, download=True)
+    dataset_name = "KMNIST-1"
+    train = EMNIST(root="data", train=True, download=True, split="letters")
+    test = EMNIST(root="data", train=False, download=True, split="letters")
+    dataset_name = "EMNIST-1"
 
-    x_train, y_train, x_test, y_test = binarize_dataset(train, test)
-    # EMNIST letters labels are 1-indexed (1-26); remap to 0-indexed so the TM
-    # allocates exactly 26 classes instead of 27
-
-    per_epoch_df, summary_df = run_experiment(
-        x_train, y_train, x_test, y_test,
+    config = ExperimentConfig(
         C=C, T=T, s=s,
         number_of_state_bits=number_of_state_bits,
         rounds=rounds,
         epochs_per_round=epochs_per_round,
         split_point=split_point,
         dataset_name=dataset_name,
+        train_dataset=train,
+        test_dataset=test,
         save_path="results",
     )
+    config.run()

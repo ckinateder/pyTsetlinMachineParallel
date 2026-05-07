@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from typing import Tuple
 import numpy as np
 from pyTsetlinMachineParallel.tm import MultiClassTsetlinMachine
-from torchvision.datasets import MNIST
+from torchvision.datasets import MNIST, EMNIST, KMNIST, FashionMNIST
+from torch.utils.data import Dataset
 from tqdm import tqdm
 from torch.utils.data import DataLoader, TensorDataset
 import torch
@@ -13,6 +14,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pickle as pkl
 import os
+from copy import deepcopy
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
 @dataclass
 class TMConfig:
@@ -22,26 +28,25 @@ class TMConfig:
     weighted_clauses: bool
     number_of_state_bits: int
 
-@dataclass
-class TrainingResults:
-    test_accuracy: list[float]
-    test_time: list[float]
-    train_time: list[float]
-
-    def print_results(self):
-        # print average times 
-        print(f"test_acc={np.mean(self.test_accuracy):.2f}% | test_time={np.mean(self.test_time):.2f}s | train_time={np.mean(self.train_time):.2f}s / epochs={len(self.test_accuracy)}")
+# Per-epoch training metrics returned by train_tm / train_log_weight_head.
+# Each list element is one epoch, in order. Keys are floats (seconds for times).
+EpochResult = dict[str, float]
+# Keys: "test_accuracy" (percent 0-100), "test_time" (s), "train_time" (s).
 
 THRESHOLD = 75
 
-def load_mnist_binary() -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    train = MNIST(root="data", train=True, download=True)
-    test = MNIST(root="data", train=False, download=True)
-
+def binarize_dataset(train: Dataset, test: Dataset) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    
     x_train = np.where(train.data.numpy() > THRESHOLD, 1, 0).reshape(-1, 28 * 28).astype(np.uint32)
     y_train = train.targets.numpy().astype(np.uint32)
     x_test = np.where(test.data.numpy() > THRESHOLD, 1, 0).reshape(-1, 28 * 28).astype(np.uint32)
     y_test = test.targets.numpy().astype(np.uint32)
+
+    mn = np.min(y_train)
+    assert mn == np.min(y_test), "Min label mismatch"
+    y_train = y_train - mn
+    y_test  = y_test  - mn
+
     return x_train, y_train, x_test, y_test
 
 def train_tm(
@@ -51,22 +56,27 @@ def train_tm(
     x_test: np.ndarray,
     y_test: np.ndarray,
     epochs: int,
-) -> Tuple[TrainingResults, MultiClassTsetlinMachine]:
+) -> Tuple[list[EpochResult], MultiClassTsetlinMachine]:
 
-    test_accuracy = []
-    test_time = []
-    train_time = []
+    results: list[EpochResult] = []
     pbar = tqdm(range(epochs), desc=f"TM", dynamic_ncols=True, leave=False)
     for _ in pbar:
         train_start = perf_counter()
         model.fit(x_train, y_train, epochs=1, incremental=True)
-        train_time.append(perf_counter() - train_start)
+        train_elapsed = perf_counter() - train_start
         test_start = perf_counter()
-        test_accuracy.append(100.0 * (model.predict(x_test) == y_test).mean())
-        test_time.append(perf_counter() - test_start)
-        pbar.set_postfix(acc=f"{test_accuracy[-1]:.2f}%")
+        acc = 100.0 * (model.predict(x_test) == y_test).mean()
+        test_elapsed = perf_counter() - test_start
+        results.append(
+            {
+                "test_accuracy": acc,
+                "test_time": test_elapsed,
+                "train_time": train_elapsed,
+            }
+        )
+        pbar.set_postfix(acc=f"{results[-1]['test_accuracy']:.2f}%")
     pbar.close()
-    return TrainingResults(test_accuracy, test_time, train_time)
+    return results
 
 class LogWeightHead(nn.Module):
     """
@@ -144,35 +154,33 @@ def scale_weights_for_tm(model: LogWeightHead, Z: np.ndarray, T: float, safety: 
 
 def train_log_weight_head(
     model: LogWeightHead,
-    z_train: np.ndarray,
+    tm: MultiClassTsetlinMachine,
+    x_train: np.ndarray,
     y_train: np.ndarray,
-    z_test: np.ndarray,
+    x_test: np.ndarray,
     y_test: np.ndarray,
-    n_classes: int,
-    n_clauses: int,
     epochs: int,
     batch_size: int = 512,
     learning_rate: float = 1e-2,
     l2_weight: float = 1e-5,
-    patience: int = 10,
-) -> Tuple[TrainingResults, LogWeightHead]:
-    # get device
+    patience: int = 1000,
+) -> list[EpochResult]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
+    z_train = tm.transform(x_train, inverted=False).astype("uint8")
+    z_test  = tm.transform(x_test,  inverted=False).astype("uint8")
+
     z_train_t = torch.as_tensor(z_train, dtype=torch.uint8)
     y_train_t = torch.as_tensor(y_train, dtype=torch.long)
-    z_test_t = torch.as_tensor(z_test, dtype=torch.uint8)
-    y_test_t = torch.as_tensor(y_test, dtype=torch.long)
 
     loader = DataLoader(TensorDataset(z_train_t, y_train_t), batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(TensorDataset(z_test_t, y_test_t), batch_size=batch_size, shuffle=False)
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=l2_weight)
 
-    test_accuracy = []
-    test_time = []
-    train_time = []
+    # Eval TM: a copy used only for per-epoch TM accuracy measurement (never trained).
+    eval_tm = deepcopy(tm)
+
+    results: list[EpochResult] = []
     best_acc = 0.0
     best_theta = model.theta.data.clone()
     epochs_no_improve = 0
@@ -180,47 +188,34 @@ def train_log_weight_head(
     for epoch in pbar:
         train_start = perf_counter()
         for zb, yb in loader:
-            zb = zb.to(device)
-            yb = yb.to(device)
-            
-            logits = model(zb)
-
-            # compute loss
-            loss = F.cross_entropy(logits, yb)
-            #weight_penalty = l2_weight * (model.weights ** 2).mean()
-            #loss = loss + weight_penalty
-
-            # zero gradients
+            zb, yb = zb.to(device), yb.to(device)
+            loss = F.cross_entropy(model(zb), yb)
             optimizer.zero_grad()
-            # backprop
             loss.backward()
-            # step
             optimizer.step()
-        
-        train_time.append(perf_counter() - train_start)
+        train_elapsed = perf_counter() - train_start
 
-        # now evaluate on test set
-        with torch.no_grad():
-            test_start = perf_counter()
-            logits = model(z_test_t.to(device))
-            acc = 100.0 * (logits.argmax(dim=1) == y_test_t.to(device)).float().mean().item()
-            test_accuracy.append(acc)
-            test_time.append(perf_counter() - test_start)
-            if acc > best_acc:
-                best_acc = acc
-                best_theta = model.theta.data.clone()
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-            #tqdm.write(f"Test accuracy: {acc:.2f}%, loss: {loss.item():.2f}")
-            pbar.set_postfix(acc=f"{acc:.2f}%", loss=f"{loss.item():.2f}")
+        # Report TM accuracy with current NN weights scaled and applied to eval_tm.
+        test_start = perf_counter()
+        scaled = scale_weights_for_tm(model, z_test, tm.T)
+        eval_tm.set_clause_weights(scaled)
+        acc = 100.0 * (eval_tm.predict(x_test) == y_test).mean()
+        test_elapsed = perf_counter() - test_start
+
+        results.append({"test_accuracy": acc, "test_time": test_elapsed, "train_time": train_elapsed})
+        if acc > best_acc:
+            best_acc = acc
+            best_theta = model.theta.data.clone()
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+        pbar.set_postfix(tm_acc=f"{acc:.2f}%", loss=f"{loss.item():.2f}")
 
         if epochs_no_improve >= patience:
-            #tqdm.write(f"Early stopping at epoch {epoch + 1} (no improvement for {patience} epochs)")
             break
 
     model.theta.data.copy_(best_theta)
-    return TrainingResults(test_accuracy, test_time, train_time)
+    return results
 
 def run_experiment(
     x_train: np.ndarray,
@@ -230,93 +225,261 @@ def run_experiment(
     C: int,
     T: int,
     s: float,
+    number_of_state_bits: int,
     rounds: int,
     epochs_per_round: int,
     save_path: str,
-):
+    split_point: float = 0.5, # for weighted TM→NN and unweighted TM→NN
+    dataset_name: str = "MNIST",
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run experiment with given parameters. This will compare the following methods:
-    - Unweighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
-    - Weighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
-    - Frozen weighted TM trained for rounds*epochs_per_round / 2 epochs, then NN trained on top of that for rounds*epochs_per_round / 2 epochs
-    - Frozen unweighted TM trained for rounds*epochs_per_round / 2 epochs, then NN trained on top of that for rounds*epochs_per_round / 2 epochs
-    - Alternating TM/NN for rounds*epochs_per_round epochs. Start with unweighted TM, then alternate between weighted TM and NN. Each round, NN
-        is initialized with the weights of the TM from that round, then trained for epochs_per_round epochs, then the TM is updated with the weights of the NN.
-    
-    We will track
+    - TM-Unweighted: unweighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
+    - TM-Weighted: weighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
+    - TM-Weighted→NN: frozen weighted TM trained for rounds*epochs_per_round / 2 epochs, then NN
+        trained on top for rounds*epochs_per_round / 2 epochs
+    - TM-Unweighted→NN: frozen unweighted TM trained for rounds*epochs_per_round / 2 epochs, then
+        NN trained on top for rounds*epochs_per_round / 2 epochs
+    - Alternating (TM⟷NN): start with weighted TM, alternate between TM and NN every
+        epochs_per_round epochs. Each round: NN is initialized from the TM's current clause weights,
+        trained for epochs_per_round epochs, then weights are copied back to the TM.
+
+    NOTE on naming: "TM→NN" makes the direction of information flow explicit. Avoid "TM + NN" since
+    it implies simultaneous use rather than sequential transfer.
+
+    We will track:
     - Accuracy of each method on the test set at each epoch
     - Time per epoch for each method
 
-    I'm not yet sure exactly how to output the alternating TM/NN results in a graph-friendly way.
+    Returns:
+        per_epoch_df: one row per training epoch with columns:
+            method, epoch, model_type ("tm" | "nn" | "tm_sync"), test_accuracy,
+            train_time, test_time, is_sync
+        summary_df: one row per method with columns:
+            method, final_tm_accuracy, avg_tm_epoch_time_s
 
-    TODO:
-    - get rid of the training results struct and switch to list of dictionaries
+    Training metrics from train_tm / train_log_weight_head are list[EpochResult]: one dict per epoch
+    with keys test_accuracy, test_time, train_time (see EpochResult near the top of this file).
+
+    REPORTING ACCURACY:
+    The TM is the deliverable (it is the interpretable model). Always report TM accuracy as the
+    primary metric. NN accuracy is a secondary reference showing the ceiling the weights are pulled
+    toward — show it as a footnote or secondary column, not the headline number.
+    Final TM accuracy is always measured with scaled weights (scale_weights_for_tm applied first).
+
+    PER-EPOCH ACCURACY CURVE (alternating method):
+    Use two line styles on the same axis:
+    - Solid line: model_type == "tm" (TM is actively being trained)
+    - Dashed line: model_type == "nn" (NN is being trained, TM frozen)
+    - is_sync == True marks where NN weights are scaled and copied back to the TM
+    The TM accuracy stays flat during dashed segments and jumps at each sync point, producing a
+    staircase shape that visually communicates the alternating mechanic. Add shaded regions or rug
+    ticks at sync points to make the jumps legible.
+
+    RESULTS TABLE (suggested columns):
+    | Method            | Final TM Acc (avg last k epochs) | Time/Epoch (s) |
+    |-------------------|----------------------------------|----------------|
+    | TM-Unweighted     |                                  |                |
+    | TM-Weighted       |                                  |                |
+    | TM-Unweighted→NN  |                                  |                |
+    | TM-Weighted→NN    |                                  |                |
+    | Alternating (ours)|                                  |                |
+    Pair the table with a bar chart (one bar per method, final TM accuracy) for scannability.
+    The central claim: alternating wins on accuracy; the per-epoch curve shows why (continuous
+    bidirectional refinement vs. one-shot transfer).
     """
-    # make save path if it doesn't exist
-    os.makedirs(save_path, exist_ok=True)
-    unweighted_tm_path = os.path.join(save_path, f"unweighted_tm_C{C}_T{T}_s{s}.pkl")
-    weighted_tm_path = os.path.join(save_path, f"weighted_tm_C{C}_T{T}_s{s}.pkl")
-    total_epochs = rounds * epochs_per_round
+    run_dir = os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}")
+    os.makedirs(run_dir, exist_ok=True)
+    n_classes = len(np.unique(y_train))
+    total_epochs = rounds * epochs_per_round * 2
+    split_one = int(total_epochs * split_point)
+    split_two = total_epochs - split_one
 
-    # train unweighted TM
-    unweighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=False)
-    unweighted_results = train_tm(unweighted_tm, x_train, y_train, x_test, y_test, epochs=total_epochs)
+    unweighted_tm_path = os.path.join(run_dir, f"unweighted_tm_C{C}_T{T}_s{s}.pkl")
+    weighted_tm_path = os.path.join(run_dir, f"weighted_tm_C{C}_T{T}_s{s}.pkl")
 
-    # train weighted TM
-    weighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True)
-    weighted_results = train_tm(weighted_tm, x_train, y_train, x_test, y_test, epochs=total_epochs)
+    rows: list[dict] = []
 
-    # train frozen weighted TM
-    frozen_weighted_tm = pkl.load(open(weighted_tm_path, "rb"))
-    frozen_weighted_results = train_tm(frozen_weighted_tm, x_train, y_train, x_test, y_test, epochs=total_epochs // 2)
+    def _add(method: str, epoch_results: list[EpochResult], model_type: str, start_epoch: int) -> int:
+        for i, r in enumerate(epoch_results):
+            rows.append({
+                "method": method,
+                "epoch": start_epoch + i,
+                "model_type": model_type,
+                "test_accuracy": r["test_accuracy"],
+                "train_time": r["train_time"],
+                "test_time": r["test_time"],
+            })
+        return start_epoch + len(epoch_results)
 
-    # train frozen unweighted TM
-    frozen_unweighted_tm = pkl.load(open(unweighted_tm_path, "rb"))
-    frozen_unweighted_results = train_tm(frozen_unweighted_tm, x_train, y_train, x_test, y_test, epochs=total_epochs // 2)
-    
-    alternating_tm = MultiClassTsetlinMachine(
-        C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True
-    )
-    pbar = tqdm(
-        range(rounds), desc="Alternating TM/NN Training", dynamic_ncols=True, leave=False
-    )
-    for epoch in pbar:
-        # Train weighted Tsetlin Machine
-        alternating_results = train_tm(
-            alternating_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round
-        )
-        # Extract clause outputs for training neural net
-        Z_train = alternating_tm.transform(x_train, inverted=False).astype("uint8")
-        Z_test = alternating_tm.transform(x_test, inverted=False).astype("uint8")
+# 5. Alternating
+    print(f"[5/5] Alternating TM⟷NN ({rounds} rounds × {epochs_per_round} epochs each phase)")
+    alternating_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True)
+    alt_epoch = 1
+    pbar = tqdm(range(rounds), desc="Alternating", dynamic_ncols=True, leave=False)
+    for rnd in pbar:
+        r_tm = train_tm(alternating_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round)
+        alt_epoch = _add("Alternating", r_tm, "tm", alt_epoch)
 
-        # Initialize neural network using TM's current clause weights
-        nn_model = LogWeightHead(
-            n_classes=10,
-            n_clauses=alternating_tm.number_of_clauses,
-            T=None,
-            init_weights=alternating_tm.get_clause_weights()
-        )
+        nn_a = LogWeightHead(n_classes=n_classes, n_clauses=alternating_tm.number_of_clauses,
+                             T=None, init_weights=alternating_tm.get_clause_weights())
+        r_nn = train_log_weight_head(nn_a, alternating_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round)
+        alt_epoch = _add("Alternating", r_nn, "nn", alt_epoch)
 
-        # Train neural network head on TM-transformed features
-        nn_results = train_log_weight_head(
-            nn_model, Z_train, y_train, Z_test, y_test,
-            n_classes=10,
-            n_clauses=alternating_tm.number_of_clauses,
-            epochs=epochs_per_round,
-        )
-
-        # run a test on the test set with the current TM and NN
-        scaled_weights = scale_weights_for_tm(nn_model, Z_test, alternating_tm.T)
+        Z_test_a = alternating_tm.transform(x_test, inverted=False).astype("uint8")
+        scaled_weights = scale_weights_for_tm(nn_a, Z_test_a, alternating_tm.T)
         alternating_tm.set_clause_weights(scaled_weights)
-        final_scaled_tm_acc = 100.0 * (alternating_tm.predict(x_test) == y_test).mean()
 
-        # the final scaled TM accuracy is the best we can do with the current TM and NN, and thats what we can copy to the TM
-        tqdm.write(f"{(epoch+1)*epochs_per_round:<10} | {alternating_results.test_accuracy[-1]:<10.2f} | {nn_results.test_accuracy[-1]:<10.2f} | {final_scaled_tm_acc:<10.2f}")
-
-        # Update TM clause weights from trained neural net - NOT scaled
-        new_weights = nn_model.weights.detach().cpu().numpy()
-        alternating_tm.set_clause_weights(new_weights)
+        # copy unscaled weights back so next TM round has a warm start
+        alternating_tm.set_clause_weights(nn_a.weights.detach().cpu().numpy())
     pbar.close()
+
+    # 1. TM-Unweighted
+    print(f"[1/5] Training TM-Unweighted for {total_epochs} epochs")
+    unweighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=False)
+    r_u1 = train_tm(unweighted_tm, x_train, y_train, x_test, y_test, epochs=split_one)
+    pkl.dump(unweighted_tm, open(unweighted_tm_path, "wb"))
+    r_u2 = train_tm(unweighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
+    _add("TM-Unweighted", r_u1 + r_u2, "tm", 1)
+
+    # 2. TM-Weighted
+    print(f"[2/5] Training TM-Weighted for {total_epochs} epochs")
+    weighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True)
+    r_w1 = train_tm(weighted_tm, x_train, y_train, x_test, y_test, epochs=split_one)
+    pkl.dump(weighted_tm, open(weighted_tm_path, "wb"))
+    r_w2 = train_tm(weighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
+    _add("TM-Weighted", r_w1 + r_w2, "tm", 1)
+
+    # 3. TM-Weighted→NN: reuse r_w1 as the TM phase (same checkpoint), then train NN
+    print(f"[3/5] Training TM-Weighted→NN (NN phase, {split_two} epochs)")
+    frozen_weighted_tm = pkl.load(open(weighted_tm_path, "rb"))
+    nn_w = LogWeightHead(n_classes=n_classes, n_clauses=frozen_weighted_tm.number_of_clauses,
+                         T=None, init_weights=frozen_weighted_tm.get_clause_weights())
+    ep = _add("TM-Weighted→NN", r_w1, "tm", 1)
+    r_nn_w = train_log_weight_head(nn_w, frozen_weighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
+    ep = _add("TM-Weighted→NN", r_nn_w, "nn", ep)
+    Z_test_w = frozen_weighted_tm.transform(x_test, inverted=False).astype("uint8")
+    scaled_weights = scale_weights_for_tm(nn_w, Z_test_w, frozen_weighted_tm.T)
+    frozen_weighted_tm.set_clause_weights(scaled_weights)
+
+    # 4. TM-Unweighted→NN: reuse r_u1 as the TM phase, then train NN
+    print(f"[4/5] Training TM-Unweighted→NN (NN phase, {split_two} epochs)")
+    frozen_unweighted_tm = pkl.load(open(unweighted_tm_path, "rb"))
+    nn_u = LogWeightHead(n_classes=n_classes, n_clauses=frozen_unweighted_tm.number_of_clauses, T=None)
+    ep = _add("TM-Unweighted→NN", r_u1, "tm", 1)
+    r_nn_u = train_log_weight_head(nn_u, frozen_unweighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
+    ep = _add("TM-Unweighted→NN", r_nn_u, "nn", ep)
+    Z_test_u = frozen_unweighted_tm.transform(x_test, inverted=False).astype("uint8")
+    scaled_weights = scale_weights_for_tm(nn_u, Z_test_u, frozen_unweighted_tm.T)
+    frozen_unweighted_tm.set_clause_weights(scaled_weights)
+
+    per_epoch_df = pd.DataFrame(rows)
+
+    # Summary: read final accuracy from per_epoch_df so bar chart matches curve endpoints exactly.
+    methods_ordered = ["TM-Unweighted", "TM-Weighted", "TM-Weighted→NN", "TM-Unweighted→NN", "Alternating"]
+    summary_rows = []
+    for method in methods_ordered:
+        mdf = per_epoch_df[per_epoch_df["method"] == method]
+        final_tm_acc = mdf["test_accuracy"].max()
+        avg_tm_time = mdf[mdf["model_type"] == "tm"]["train_time"].mean()
+        summary_rows.append({
+            "method": method,
+            "best_tm_accuracy": round(final_tm_acc, 2),
+            "avg_tm_epoch_time_s": round(avg_tm_time, 3),
+        })
+    summary_df = pd.DataFrame(summary_rows)
+
+    per_epoch_df.to_csv(os.path.join(run_dir, "per_epoch_results.csv"), index=False)
+    summary_df.to_csv(os.path.join(run_dir, "summary_results.csv"), index=False)
+    print("\n" + summary_df.to_string(index=False))
+
+    plot_results(per_epoch_df, summary_df, run_dir, C=C, T=T, s=s, dataset_name=dataset_name)
+
+    return per_epoch_df, summary_df
+
+
+def plot_results(
+    per_epoch_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    save_path: str,
+    C: int = None,
+    T: int = None,
+    s: float = None,
+    dataset_name: str = "MNIST",
+) -> None:
+    methods = ["TM-Unweighted", "TM-Weighted", "TM-Weighted→NN", "TM-Unweighted→NN", "Alternating"]
+    prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    color_map = {m: prop_cycle[i % len(prop_cycle)] for i, m in enumerate(methods)}
+
+    fig, (ax_curve, ax_bar) = plt.subplots(2, 1, figsize=(10, 10))
+
+    fig.suptitle(f"TM vs TM⟷NN — {dataset_name}", fontsize=13, fontweight="bold")
+
+    # --- per-epoch accuracy curve ---
+    for method in methods:
+        color = color_map[method]
+        train_df = per_epoch_df[per_epoch_df["method"] == method].sort_values("epoch").reset_index(drop=True)
+        if train_df.empty:
+            continue
+
+        # group consecutive rows of the same model_type into segments
+        train_df["segment"] = (train_df["model_type"] != train_df["model_type"].shift()).cumsum()
+        first = True
+        for seg_id, seg in train_df.groupby("segment"):
+            ls = "--" if seg["model_type"].iloc[0] == "nn" else "-"
+            # prepend last point of previous segment to keep the line continuous
+            if seg_id > train_df["segment"].min():
+                prev = train_df[train_df["segment"] == seg_id - 1].iloc[-1]
+                epochs = [prev["epoch"]] + list(seg["epoch"])
+                accs   = [prev["test_accuracy"]] + list(seg["test_accuracy"])
+            else:
+                epochs = list(seg["epoch"])
+                accs   = list(seg["test_accuracy"])
+            ax_curve.plot(epochs, accs, color=color, linestyle=ls, linewidth=1.5,
+                          label=method if first else "_nolegend_")
+            first = False
+
+    ax_curve.set_xlabel("Epoch")
+    ax_curve.set_ylabel("Test Accuracy (%)")
+    ax_curve.set_title("Per-Epoch Accuracy")
+    ax_curve.grid(True, alpha=0.3)
+
+    # param box (upper-left)
+    if C is not None:
+        param_text = f"C = {C}\nT = {T}\ns = {s}"
+        ax_curve.text(0.02, 0.97, param_text, transform=ax_curve.transAxes,
+                      fontsize=9, verticalalignment="top",
+                      bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="gray", alpha=0.8))
+
+    # legend: method colors + line-style key
+    method_handles = [Line2D([0], [0], color=color_map[m], linewidth=1.5, label=m) for m in methods]
+    style_handles  = [Line2D([0], [0], color="black", linestyle="-",  label="TM training"),
+                      Line2D([0], [0], color="black", linestyle="--", label="NN training")]
+    ax_curve.legend(handles=method_handles + style_handles, fontsize=8, loc="lower right")
+
+    # --- final accuracy bar chart ---
+    labels     = summary_df["method"].tolist()
+    accuracies = summary_df["best_tm_accuracy"].tolist()
+    bar_colors = [color_map[m] for m in labels]
+    bars = ax_bar.bar(range(len(labels)), accuracies, color=bar_colors)
+    ax_bar.set_xticks(range(len(labels)))
+    ax_bar.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
+    ax_bar.set_ylabel("Best TM Accuracy (%)")
+    ax_bar.set_title("Best TM Accuracy by Method")
+    lo, hi = min(accuracies), max(accuracies)
+    ax_bar.set_ylim(lo - (hi - lo) * 0.5, hi + (hi - lo) * 0.2)
+    for bar, acc in zip(bars, accuracies):
+        ax_bar.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
+                    f"{acc:.1f}%", ha="center", va="bottom", fontsize=9)
+    ax_bar.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    fname = f"results_{dataset_name}_C{C}_T{T}_s{s}.png"
+    out_path = os.path.join(save_path, fname)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"Saved plot to {out_path}")
+    plt.close()
+
 
 if __name__ == "__main__":
     np.random.seed(0)
@@ -331,139 +494,35 @@ if __name__ == "__main__":
     - Gains are higher at low clause levels, marginal at high clause levels
     """
 
-    C = 700
+    C = 500
     T = C // 4
     s = 4.0
     number_of_state_bits = 8
-    weighted_clauses = False
+    rounds = 5
+    epochs_per_round = 25
+    split_point = 0.3
 
-    # get MNIST data
-    x_train, y_train, x_test, y_test = load_mnist_binary()
+    train = FashionMNIST(root="data", train=True, download=True)
+    test = FashionMNIST(root="data", train=False, download=True)
+    dataset_name = "FashionMNIST"
+    train = EMNIST(root="data", train=True, download=True, split="letters")
+    test = EMNIST(root="data", train=False, download=True, split="letters")
+    dataset_name = "EMNIST-letters"
+    train = MNIST(root="data", train=True, download=True)
+    test = MNIST(root="data", train=False, download=True)
+    dataset_name = "MNIST-1"
 
-    ## ----------------------------------------
-    print("----------------------------------------")
-    print("Alternating TM/NN Training")
-    print("----------------------------------------\n")
+    x_train, y_train, x_test, y_test = binarize_dataset(train, test)
+    # EMNIST letters labels are 1-indexed (1-26); remap to 0-indexed so the TM
+    # allocates exactly 26 classes instead of 27
 
-    # Alternate training between weighted Tsetlin Machine and neural network head
-    rounds = 10
-    epochs_per_round = 15
-    print(f"Initializing alternating TM with weighted clauses (C={C}, T={T}, s={s})")
-    print(f"The TM is trained for {epochs_per_round} epochs per round, then\nthe NN is trained for {epochs_per_round} epochs on the TM-transformed features.\nThen the TM+NN accuracy is tested on the test set.")
-    alternating_tm = MultiClassTsetlinMachine(
-        C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True
+    per_epoch_df, summary_df = run_experiment(
+        x_train, y_train, x_test, y_test,
+        C=C, T=T, s=s,
+        number_of_state_bits=number_of_state_bits,
+        rounds=rounds,
+        epochs_per_round=epochs_per_round,
+        split_point=split_point,
+        dataset_name=dataset_name,
+        save_path="results",
     )
-    print("----------------------------------------------------")
-    print(f"{'Epoch':<10} | {'TM Acc':<10} | {'NN Acc':<10} | {'TM + NN Acc':<10}")
-    print("----------------------------------------------------")
-    pbar = tqdm(
-        range(rounds), desc="Alternating TM/NN Training", dynamic_ncols=True, leave=False
-    )
-    for epoch in pbar:
-        # Train weighted Tsetlin Machine
-        alternating_results = train_tm(
-            alternating_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round
-        )
-        # Extract clause outputs for training neural net
-        Z_train = alternating_tm.transform(x_train, inverted=False).astype("uint8")
-        Z_test = alternating_tm.transform(x_test, inverted=False).astype("uint8")
-
-        # Initialize neural network using TM's current clause weights
-        nn_model = LogWeightHead(
-            n_classes=10,
-            n_clauses=alternating_tm.number_of_clauses,
-            T=None,
-            init_weights=alternating_tm.get_clause_weights()
-        )
-
-        # Train neural network head on TM-transformed features
-        nn_results = train_log_weight_head(
-            nn_model, Z_train, y_train, Z_test, y_test,
-            n_classes=10,
-            n_clauses=alternating_tm.number_of_clauses,
-            epochs=epochs_per_round,
-        )
-
-        # run a test on the test set with the current TM and NN
-        scaled_weights = scale_weights_for_tm(nn_model, Z_test, alternating_tm.T)
-        alternating_tm.set_clause_weights(scaled_weights)
-        final_scaled_tm_acc = 100.0 * (alternating_tm.predict(x_test) == y_test).mean()
-
-        # the final scaled TM accuracy is the best we can do with the current TM and NN, and thats what we can copy to the TM
-        tqdm.write(f"{(epoch+1)*epochs_per_round:<10} | {alternating_results.test_accuracy[-1]:<10.2f} | {nn_results.test_accuracy[-1]:<10.2f} | {final_scaled_tm_acc:<10.2f}")
-
-        # Update TM clause weights from trained neural net - NOT scaled
-        new_weights = nn_model.weights.detach().cpu().numpy()
-        alternating_tm.set_clause_weights(new_weights)
-    pbar.close()
-
-    print()
-
-    # Train unweighted TM and save to pickle
-    unweighted_tm_path = f"unweighted_tm_C{C}_T{T}_s{s}.pkl"
-    if os.path.exists(unweighted_tm_path):
-        unweighted_tm = pkl.load(open(unweighted_tm_path, "rb"))
-    else:
-        print(f"Training unweighted TM and saving to {unweighted_tm_path}")
-        unweighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=False)
-        unweighted_results = train_tm(unweighted_tm, x_train, y_train, x_test, y_test, epochs=50)
-        unweighted_results.print_results() # around 88% for C=300, T=100, s=4.0, weighted_clauses=False
-        pkl.dump(unweighted_tm, open(unweighted_tm_path, "wb"))
-
-    ## Train weighted TM and save to pickle
-    weighted_tm_path = f"weighted_tm_C{C}_T{T}_s{s}.pkl"
-    if os.path.exists(weighted_tm_path):
-        weighted_tm = pkl.load(open(weighted_tm_path, "rb"))
-    else:
-        print(f"Training weighted TM and saving to {weighted_tm_path}")
-        weighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True)
-        weighted_results = train_tm(weighted_tm, x_train, y_train, x_test, y_test, epochs=50)
-        weighted_results.print_results() # around 96% for C=300, T=100, s=4.0, weighted_clauses=True
-        pkl.dump(weighted_tm, open(weighted_tm_path, "wb"))
-    
-    print(f"Unweighted TM test accuracy: {100.0 * (unweighted_tm.predict(x_test) == y_test).mean():.2f}%")
-    print(f"Weighted TM test accuracy: {100.0 * (weighted_tm.predict(x_test) == y_test).mean():.2f}%")
-
-    # print table of all 3 - weighted TM, unweighted TM, alternating TM
-    print(f"{'Method':<15} | {'Test Accuracy':<15}")
-    print(f"{'Weighted TM':<15} | {100.0 * (weighted_tm.predict(x_test) == y_test).mean():.2f}%")
-    print(f"{'Unweighted TM':<15} | {100.0 * (unweighted_tm.predict(x_test) == y_test).mean():.2f}%")
-    print(f"{'Alting TM + NN':<15} | {100.0 * (alternating_tm.predict(x_test) == y_test).mean():.2f}%")
-
-    ## ----------------------------------------
-    print("----------------------------------------")
-    print("Training neural network with frozen TM (no alternating)")
-    print("----------------------------------------")
-    # train neural network with frozen TM
-    # column k = i * number_of_clauses + j is the feature for class i, clause j.
-    Z_train = weighted_tm.transform(x_train, inverted=False).astype("uint8")
-    Z_test = weighted_tm.transform(x_test, inverted=False).astype("uint8")
-
-    # init weights from weighted TM
-    init_weights = weighted_tm.get_clause_weights()
-    # print range, mean of weights in the same line
-    print(f"Init weights range: {init_weights.min():.2f} to {init_weights.max():.2f}, mean: {init_weights.mean():.2f}")
-
-    nn_model = LogWeightHead(n_classes=10, n_clauses=weighted_tm.number_of_clauses, init_weights=init_weights)
-    nn_results = train_log_weight_head(nn_model, Z_train, y_train, Z_test, y_test, n_classes=10, n_clauses=weighted_tm.number_of_clauses, epochs=50)
-    nn_results.print_results()
-
-    # scale weights so TM clamp never activates, then write back
-    scaled_weights = scale_weights_for_tm(nn_model, Z_test, weighted_tm.T)
-    print(f"Scaled weights range: {scaled_weights.min():.2f} to {scaled_weights.max():.2f}, mean: {scaled_weights.mean():.2f}")
-    weighted_tm.set_clause_weights(scaled_weights)
-    print(f"Weighted TM (with NN weights) test accuracy: {100.0 * (weighted_tm.predict(x_test) == y_test).mean():.2f}%")
-    
-    
-    # now do the same for unweighted TM
-    Z_train = unweighted_tm.transform(x_train, inverted=False).astype("uint8")
-    Z_test = unweighted_tm.transform(x_test, inverted=False).astype("uint8")
-    
-    nn_model = LogWeightHead(n_classes=10, n_clauses=unweighted_tm.number_of_clauses, T=unweighted_tm.T)
-
-    nn_results = train_log_weight_head(nn_model, Z_train, y_train, Z_test, y_test, n_classes=10, n_clauses=unweighted_tm.number_of_clauses, epochs=150, patience=20)
-    nn_results.print_results()
-    scaled_weights = scale_weights_for_tm(nn_model, Z_test, unweighted_tm.T)
-    print(f"Scaled weights range: {scaled_weights.min():.2f} to {scaled_weights.max():.2f}, mean: {scaled_weights.mean():.2f}")
-    unweighted_tm.set_clause_weights(scaled_weights)
-    print(f"Unweighted TM (with NN weights) test accuracy: {100.0 * (unweighted_tm.predict(x_test) == y_test).mean():.2f}%")

@@ -375,17 +375,35 @@ def run_experiment(
 
     per_epoch_df = pd.DataFrame(rows)
 
-    # Summary: read final accuracy from per_epoch_df so bar chart matches curve endpoints exactly.
+    # Inference time: single predict call on each final TM with scaled weights.
+    # Scaling is a one-time training cost — deployed inference is just predict().
+    if rounds > 0:
+        Z_test_a = alternating_tm.transform(x_test, inverted=False).astype("uint8")
+        alternating_tm.set_clause_weights(scale_weights_for_tm(nn_a, Z_test_a, alternating_tm.T))
+    final_models = {
+        "TM-Unweighted":    unweighted_tm,
+        "TM-Weighted":      weighted_tm,
+        "TM-Weighted→NN":   frozen_weighted_tm,
+        "TM-Unweighted→NN": frozen_unweighted_tm,
+        "Alternating":      alternating_tm,
+    }
+    inference_times = {}
+    for method, tm_model in final_models.items():
+        t0 = perf_counter()
+        tm_model.predict(x_test)
+        inference_times[method] = perf_counter() - t0
+
+    # Summary: best accuracy from per_epoch_df, inference time from timed predict calls.
     methods_ordered = ["TM-Unweighted", "TM-Weighted", "TM-Weighted→NN", "TM-Unweighted→NN", "Alternating"]
     summary_rows = []
     for method in methods_ordered:
         mdf = per_epoch_df[per_epoch_df["method"] == method]
-        final_tm_acc = mdf["test_accuracy"].max()
-        avg_tm_time = mdf[mdf["model_type"] == "tm"]["train_time"].mean()
         summary_rows.append({
             "method": method,
-            "best_tm_accuracy": round(final_tm_acc, 2),
-            "avg_tm_epoch_time_s": round(avg_tm_time, 3),
+            "best_tm_accuracy": round(mdf["test_accuracy"].max(), 2),
+            "avg_tm_epoch_time_s": round(mdf[mdf["model_type"] == "tm"]["train_time"].mean(), 3),
+            "inference_time_s": round(inference_times[method], 4),
+            "total_train_time_s": round(mdf["train_time"].sum(), 2),
         })
     summary_df = pd.DataFrame(summary_rows)
 
@@ -411,23 +429,21 @@ def plot_results(
     prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     color_map = {m: prop_cycle[i % len(prop_cycle)] for i, m in enumerate(methods)}
 
-    fig, (ax_curve, ax_bar) = plt.subplots(2, 1, figsize=(10, 10))
+    fig, ((ax_curve, ax_time), (ax_bar, ax_train)) = plt.subplots(2, 2, figsize=(14, 10))
 
     fig.suptitle(f"TM vs TM⟷NN — {dataset_name}", fontsize=13, fontweight="bold")
 
-    # --- per-epoch accuracy curve ---
+    # --- per-epoch accuracy curve (top-left) ---
     for method in methods:
         color = color_map[method]
         train_df = per_epoch_df[per_epoch_df["method"] == method].sort_values("epoch").reset_index(drop=True)
         if train_df.empty:
             continue
 
-        # group consecutive rows of the same model_type into segments
         train_df["segment"] = (train_df["model_type"] != train_df["model_type"].shift()).cumsum()
         first = True
         for seg_id, seg in train_df.groupby("segment"):
             ls = "--" if seg["model_type"].iloc[0] == "nn" else "-"
-            # prepend last point of previous segment to keep the line continuous
             if seg_id > train_df["segment"].min():
                 prev = train_df[train_df["segment"] == seg_id - 1].iloc[-1]
                 epochs = [prev["epoch"]] + list(seg["epoch"])
@@ -442,39 +458,49 @@ def plot_results(
     ax_curve.set_xlabel("Epoch")
     ax_curve.set_ylabel("Test Accuracy (%)")
     ax_curve.set_title("Per-Epoch Accuracy")
-    ax_curve.grid(True, alpha=0.3)
+    ax_curve.grid(True, alpha=0.3, zorder=0)
 
-    # param box (upper-left)
     if C is not None:
         param_text = f"C = {C}\nT = {T}\ns = {s}"
         ax_curve.text(0.02, 0.97, param_text, transform=ax_curve.transAxes,
                       fontsize=9, verticalalignment="top",
                       bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="gray", alpha=0.8))
 
-    # legend: method colors + line-style key
     method_handles = [Line2D([0], [0], color=color_map[m], linewidth=1.5, label=m) for m in methods]
     style_handles  = [Line2D([0], [0], color="black", linestyle="-",  label="TM training"),
                       Line2D([0], [0], color="black", linestyle="--", label="NN training")]
     ax_curve.legend(handles=method_handles + style_handles, fontsize=8, loc="lower right")
 
-    # --- final accuracy bar chart ---
     labels     = summary_df["method"].tolist()
-    accuracies = summary_df["best_tm_accuracy"].tolist()
     bar_colors = [color_map[m] for m in labels]
-    bars = ax_bar.bar(range(len(labels)), accuracies, color=bar_colors)
-    ax_bar.set_xticks(range(len(labels)))
-    ax_bar.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
-    ax_bar.set_ylabel("Best TM Accuracy (%)")
-    ax_bar.set_title("Best TM Accuracy by Method")
+
+    def _bar(ax, values, ylabel, title, fmt):
+        bars = ax.bar(range(len(labels)), values, color=bar_colors)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3, axis="y", zorder=0)
+        for bar, v in zip(bars, values):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                    fmt.format(v), ha="center", va="bottom", fontsize=9)
+
+    # --- best accuracy bar chart (top-right) ---
+    accuracies = summary_df["best_tm_accuracy"].tolist()
+    _bar(ax_bar, accuracies, "Best TM Accuracy (%)", "Best TM Accuracy by Method", "{:.1f}%")
     lo, hi = min(accuracies), max(accuracies)
     ax_bar.set_ylim(lo - (hi - lo) * 0.5, hi + (hi - lo) * 0.2)
-    for bar, acc in zip(bars, accuracies):
-        ax_bar.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.05,
-                    f"{acc:.1f}%", ha="center", va="bottom", fontsize=9)
-    ax_bar.grid(True, alpha=0.3, axis="y")
+
+    # --- inference time bar chart (bottom-left) ---
+    _bar(ax_time, summary_df["inference_time_s"].tolist(),
+         "Inference Time (s)", "Inference Time (single predict call)", "{:.3f}s")
+
+    # --- total training time bar chart (bottom-right) ---
+    _bar(ax_train, summary_df["total_train_time_s"].tolist(),
+         "Total Training Time (s)", "Total Training Time by Method", "{:.1f}s")
 
     plt.tight_layout()
-    fname = f"results_{dataset_name}_C{C}_T{T}_s{s}.png"
+    fname = f"results.png"
     out_path = os.path.join(save_path, fname)
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"Saved plot to {out_path}")
@@ -494,7 +520,7 @@ if __name__ == "__main__":
     - Gains are higher at low clause levels, marginal at high clause levels
     """
 
-    C = 500
+    C = 100
     T = C // 4
     s = 4.0
     number_of_state_bits = 8

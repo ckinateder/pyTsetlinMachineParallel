@@ -118,7 +118,7 @@ void mc_tm_predict(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int 
 	}
 
 	for (int t = 0; t < max_threads; t++) {
-		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {	
+		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {
 
 			struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
 
@@ -126,12 +126,15 @@ void mc_tm_predict(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int 
 			free(tm_thread->output_one_patches);
 			free(tm_thread->feedback_to_la);
 			free(tm_thread->feedback_to_clauses);
+			free(tm_thread->clause_patch);
 			free(tm_thread);
 		}
+		free(mc_tm_thread[t]->tsetlin_machines);
+		free(mc_tm_thread[t]);
 	}
 
 	free(mc_tm_thread);
-	
+
 	return;
 }
 
@@ -180,7 +183,7 @@ void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, un
 	}
 
 	for (int t = 0; t < max_threads; t++) {
-		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {	
+		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {
 
 			struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
 
@@ -188,12 +191,15 @@ void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, un
 			free(tm_thread->output_one_patches);
 			free(tm_thread->feedback_to_la);
 			free(tm_thread->feedback_to_clauses);
+			free(tm_thread->clause_patch);
 			free(tm_thread);
 		}
+		free(mc_tm_thread[t]->tsetlin_machines);
+		free(mc_tm_thread[t]);
 	}
 
 	free(mc_tm_thread);
-	
+
 	return;
 }
 
@@ -265,7 +271,7 @@ void mc_tm_fit(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, 
 	}
 
 	for (int t = 0; t < max_threads; t++) {
-		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {	
+		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {
 
 			struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
 
@@ -273,11 +279,16 @@ void mc_tm_fit(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, 
 			free(tm_thread->output_one_patches);
 			free(tm_thread->feedback_to_la);
 			free(tm_thread->feedback_to_clauses);
+			free(tm_thread->clause_patch);
 			free(tm_thread);
 		}
+		free(mc_tm_thread[t]->tsetlin_machines);
+		free(mc_tm_thread[t]);
 	}
 
-	free(tm->clause_lock);
+	for (int i = 0; i < mc_tm->number_of_classes; i++) {
+		free(mc_tm->tsetlin_machines[i]->clause_lock);
+	}
 	free(mc_tm_thread);
 }
 
@@ -371,8 +382,8 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
 
 			for (int j = 0; j < mc_tm->tsetlin_machines[i]->number_of_clauses; ++j) {
 				// Calculate position in transformed feature space
-				unsigned long transformed_feature = l*mc_tm->number_of_classes*mc_tm->tsetlin_machines[i]->number_of_clauses + 
-													i*mc_tm->tsetlin_machines[i]->number_of_clauses + j;
+				unsigned long transformed_feature = (unsigned long)l*mc_tm->number_of_classes*mc_tm->tsetlin_machines[i]->number_of_clauses +
+													(unsigned long)i*mc_tm->tsetlin_machines[i]->number_of_clauses + j;
 					
 				// Get the clause output from the bit packed format
 				int clause_chunk = j / 32;
@@ -391,8 +402,21 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
 		}
 	}
 
-	// TODO: Free the memory allocated for the threads
-	
+	for (int t = 0; t < max_threads; t++) {
+		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {
+			struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
+			free(tm_thread->clause_output);
+			free(tm_thread->output_one_patches);
+			free(tm_thread->feedback_to_la);
+			free(tm_thread->feedback_to_clauses);
+			free(tm_thread->clause_patch);
+			free(tm_thread);
+		}
+		free(mc_tm_thread[t]->tsetlin_machines);
+		free(mc_tm_thread[t]);
+	}
+	free(mc_tm_thread);
+
 	return;
 }
 /*
@@ -535,18 +559,23 @@ void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int
 
     // Free thread-local TM instances
     for (int t = 0; t < max_threads; t++) {
-        for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {    
+        for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {
             struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
             // Free temporary buffers while preserving shared state
             free(tm_thread->clause_output);
             free(tm_thread->output_one_patches);
             free(tm_thread->feedback_to_la);
             free(tm_thread->feedback_to_clauses);
+            free(tm_thread->clause_patch);
             free(tm_thread);
         }
+        free(mc_tm_thread[t]->tsetlin_machines);
+        free(mc_tm_thread[t]);
     }
 
     // Final memory cleanup
-    free(tm->clause_lock);
+    for (int i = 0; i < mc_tm->number_of_classes; i++) {
+        free(mc_tm->tsetlin_machines[i]->clause_lock);
+    }
     free(mc_tm_thread);
 }

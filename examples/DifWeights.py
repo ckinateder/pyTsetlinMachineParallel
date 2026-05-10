@@ -9,6 +9,7 @@ from torchvision.datasets import MNIST, EMNIST, KMNIST, FashionMNIST
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from torch.utils.data import DataLoader, TensorDataset
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -288,10 +289,14 @@ def run_experiment(
     The central claim: alternating wins on accuracy; the per-epoch curve shows why (continuous
     bidirectional refinement vs. one-shot transfer).
     """
-    run_dir = os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}")
-    os.makedirs(run_dir, exist_ok=True)
     n_classes = len(np.unique(y_train))
     total_epochs = rounds * epochs_per_round * 2
+    #  check if the run directory already exists and results exist in it
+    if os.path.exists(os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}", "per_epoch_results.csv")):
+        print(f"Run directory {os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}")} already exists and results exist in it. Skipping...")
+        return None, None
+    run_dir = os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}")
+    os.makedirs(run_dir, exist_ok=True)
     split_one = int(total_epochs * split_point)
     split_two = total_epochs - split_one
 
@@ -323,7 +328,7 @@ def run_experiment(
 
         nn_a = LogWeightHead(n_classes=n_classes, n_clauses=alternating_tm.number_of_clauses,
                              T=None, init_weights=alternating_tm.get_clause_weights())
-        r_nn = train_log_weight_head(nn_a, alternating_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round)
+        r_nn = train_log_weight_head(nn_a, alternating_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round, patience=10)
         alt_epoch = _add("Alternating", r_nn, "nn", alt_epoch)
 
         Z_test_a = alternating_tm.transform(x_test, inverted=False).astype("uint8")
@@ -387,11 +392,16 @@ def run_experiment(
         "TM-Unweighted→NN": frozen_unweighted_tm,
         "Alternating":      alternating_tm,
     }
-    inference_times = {}
-    for method, tm_model in final_models.items():
+    # Randomize run order and repeat to get a reliable inference time estimate.
+    _N_INFERENCE_REPS = 10
+    inference_times = {m: [] for m in final_models}
+    run_order = list(final_models.items()) * _N_INFERENCE_REPS
+    random.shuffle(run_order)
+    for method, tm_model in run_order:
         t0 = perf_counter()
         tm_model.predict(x_test)
-        inference_times[method] = perf_counter() - t0
+        inference_times[method].append(perf_counter() - t0)
+    inference_times = {m: sum(v) / len(v) for m, v in inference_times.items()}
 
     # Summary: best accuracy from per_epoch_df, inference time from timed predict calls.
     methods_ordered = ["TM-Unweighted", "TM-Weighted", "TM-Weighted→NN", "TM-Unweighted→NN", "Alternating"]
@@ -434,6 +444,7 @@ def plot_results(
     fig.suptitle(f"TM vs TM⟷NN — {dataset_name}", fontsize=13, fontweight="bold")
 
     # --- per-epoch accuracy curve (top-left) ---
+    max_epoch = per_epoch_df["epoch"].max()
     for method in methods:
         color = color_map[method]
         train_df = per_epoch_df[per_epoch_df["method"] == method].sort_values("epoch").reset_index(drop=True)
@@ -454,6 +465,12 @@ def plot_results(
             ax_curve.plot(epochs, accs, color=color, linestyle=ls, linewidth=1.5,
                           label=method if first else "_nolegend_")
             first = False
+
+        # Extend to max_epoch with a faint dotted line so methods that end early don't leave gaps.
+        last = train_df.iloc[-1]
+        if last["epoch"] < max_epoch:
+            ax_curve.plot([last["epoch"], max_epoch], [last["test_accuracy"]] * 2,
+                          color=color, linestyle=":", linewidth=1.0, alpha=0.4)
 
     ax_curve.set_xlabel("Epoch")
     ax_curve.set_ylabel("Test Accuracy (%)")
@@ -508,6 +525,11 @@ def plot_results(
     plt.close()
 
 @dataclass
+class CustomDataset:
+    name: str
+    train_dataset: Dataset
+    test_dataset: Dataset
+@dataclass
 class ExperimentConfig:
     C: int
     T: int
@@ -548,36 +570,35 @@ if __name__ == "__main__":
     - Gains are higher at low clause levels, marginal at high clause levels
     """
 
-    C = 500
+    C = 400
     T = C // 4
     s = 4.0
     number_of_state_bits = 8
     rounds = 5
-    epochs_per_round = 25
+    epochs_per_round = 50
     split_point = 0.3
 
-    train = FashionMNIST(root="data", train=True, download=True)
-    test = FashionMNIST(root="data", train=False, download=True)
-    dataset_name = "FashionMNIST"
-    train = MNIST(root="data", train=True, download=True)
-    test = MNIST(root="data", train=False, download=True)
-    dataset_name = "MNIST-1"
-    train = KMNIST(root="data", train=True, download=True)
-    test = KMNIST(root="data", train=False, download=True)
-    dataset_name = "KMNIST-1"
-    train = EMNIST(root="data", train=True, download=True, split="letters")
-    test = EMNIST(root="data", train=False, download=True, split="letters")
-    dataset_name = "EMNIST-1"
+    EMNISTDataset = CustomDataset(name="EMNIST", train_dataset=EMNIST(root="data", train=True, download=True, split="letters"), test_dataset=EMNIST(root="data", train=False, download=True, split="letters"))
+    FashionMNISTDataset = CustomDataset(name="FashionMNIST", train_dataset=FashionMNIST(root="data", train=True, download=True), test_dataset=FashionMNIST(root="data", train=False, download=True))
+    MNISTDataset = CustomDataset(name="MNIST", train_dataset=MNIST(root="data", train=True, download=True), test_dataset=MNIST(root="data", train=False, download=True))
+    KMNISTDataset = CustomDataset(name="KMNIST", train_dataset=KMNIST(root="data", train=True, download=True), test_dataset=KMNIST(root="data", train=False, download=True))
+    
+    datasets = [EMNISTDataset, FashionMNISTDataset, MNISTDataset, KMNISTDataset]
+    #random.shuffle(datasets)
 
-    config = ExperimentConfig(
-        C=C, T=T, s=s,
-        number_of_state_bits=number_of_state_bits,
-        rounds=rounds,
-        epochs_per_round=epochs_per_round,
-        split_point=split_point,
-        dataset_name=dataset_name,
-        train_dataset=train,
-        test_dataset=test,
-        save_path="results",
-    )
-    config.run()
+    for dataset in datasets:
+        for C in [25, 50, 100, 300, 500, 1000]:
+            T = C // 4
+            print(f"Running experiment for {dataset.name} with C={C}, T={T}, s={s}")
+            config = ExperimentConfig(
+                C=C, T=T, s=s,
+                number_of_state_bits=number_of_state_bits,
+                rounds=rounds,
+                epochs_per_round=epochs_per_round,
+                split_point=split_point,
+                dataset_name=dataset.name,
+                train_dataset=dataset.train_dataset,
+                test_dataset=dataset.test_dataset,
+                save_path="results",
+            )
+            config.run()

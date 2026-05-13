@@ -16,7 +16,7 @@ import torch.nn.functional as F
 import pickle as pkl
 import os
 from copy import deepcopy
-
+import itertools
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -176,7 +176,10 @@ def train_log_weight_head(
     y_train_t = torch.as_tensor(y_train, dtype=torch.long)
 
     loader = DataLoader(TensorDataset(z_train_t, y_train_t), batch_size=batch_size, shuffle=True)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=l2_weight)
+    # weight_decay=0: we apply manual L2 toward theta_init below, not toward zero.
+    # This keeps the NN from inflating dominant clause weights at the expense of informative small ones.
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.0)
+    theta_init = model.theta.data.clone().to(device)
 
     # Eval TM: a copy used only for per-epoch TM accuracy measurement (never trained).
     eval_tm = deepcopy(tm)
@@ -190,7 +193,7 @@ def train_log_weight_head(
         train_start = perf_counter()
         for zb, yb in loader:
             zb, yb = zb.to(device), yb.to(device)
-            loss = F.cross_entropy(model(zb), yb)
+            loss = F.cross_entropy(model(zb), yb) + l2_weight * (model.theta - theta_init).pow(2).sum()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -218,6 +221,79 @@ def train_log_weight_head(
     model.theta.data.copy_(best_theta)
     return results
 
+
+def _last10_accuracy_rows(method: str, mdf: pd.DataFrame) -> pd.DataFrame:
+    """Rows used for avg_last10_tm_accuracy (same logic as run_experiment summary)."""
+    if method in ("WTM→NN", "UTM→NN", "Cyclic"):
+        sub = mdf[mdf["model_type"] == "nn"]
+    else:
+        sub = mdf[mdf["model_type"] == "tm"]
+    return sub.sort_values("epoch").tail(10)
+
+
+def aggregate_experiment_results(
+    dataset_name: str,
+    per_epoch_dfs: list[pd.DataFrame],
+    summary_dfs: list[pd.DataFrame],
+    save_path: str,
+) -> pd.DataFrame:
+    """
+    Per method: mean and sample std (ddof=1).
+    - avg_last10_tm_accuracy: same last-10 rows as run_experiment (_last10_accuracy_rows);
+      pool test_accuracy across runs → 10 * n_seeds values.
+    - avg_tm_epoch_time_s, inference_time_s, total_train_time_s: recomputed / read like
+      run_experiment summary (one scalar per run) → n_seeds values each.
+    """
+    methods_ordered = ["UTM", "WTM", "WTM→NN", "UTM→NN", "Cyclic"]
+    n = len(per_epoch_dfs)
+    if n == 0:
+        raise ValueError("aggregate_experiment_results: no runs")
+    if len(summary_dfs) != n:
+        raise ValueError("aggregate_experiment_results: per_epoch_dfs and summary_dfs length mismatch")
+
+    def _std(vals: list[float]) -> float:
+        if len(vals) < 2:
+            return 0.0
+        return float(np.std(vals, ddof=1))
+
+    out_rows = []
+    for method in methods_ordered:
+        acc_vals: list[float] = []
+        tm_train_vals: list[float] = []
+        inf_vals: list[float] = []
+        tot_vals: list[float] = []
+        for pe_df, su_df in zip(per_epoch_dfs, summary_dfs):
+            mdf = pe_df[pe_df["method"] == method]
+            acc_vals.extend(_last10_accuracy_rows(method, mdf)["test_accuracy"].astype(float).tolist())
+            tm_train_vals.append(float(mdf[mdf["model_type"] == "tm"]["train_time"].mean()))
+            srow = su_df[su_df["method"] == method].iloc[0]
+            inf_vals.append(float(srow["inference_time_s"]))
+            tot_vals.append(float(srow["total_train_time_s"]))
+
+        out_rows.append({
+            "dataset": dataset_name,
+            "method": method,
+            "n_seeds": n,
+            "n_pooled_accuracy_epochs": len(acc_vals),
+            "avg_last10_tm_accuracy_mean": round(float(np.mean(acc_vals)), 4),
+            "avg_last10_tm_accuracy_std": round(_std(acc_vals), 4),
+            "avg_tm_epoch_time_s_mean": round(float(np.mean(tm_train_vals)), 4),
+            "avg_tm_epoch_time_s_std": round(_std(tm_train_vals), 4),
+            "inference_time_s_mean": round(float(np.mean(inf_vals)), 4),
+            "inference_time_s_std": round(_std(inf_vals), 4),
+            "total_train_time_s_mean": round(float(np.mean(tot_vals)), 2),
+            "total_train_time_s_std": round(_std(tot_vals), 2),
+        })
+
+    agg_df = pd.DataFrame(out_rows)
+    out_path = os.path.join(save_path, f"{dataset_name}_aggregate_summary_results.csv")
+    agg_df.to_csv(out_path, index=False)
+    n_acc = out_rows[0]["n_pooled_accuracy_epochs"] if out_rows else 0
+    print(f"\nAggregate summary ({n} seeds; accuracy pooled over {n_acc} per-epoch values) saved to {out_path}")
+    print(agg_df.to_string(index=False))
+    return agg_df
+
+
 def run_experiment(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -235,13 +311,13 @@ def run_experiment(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run experiment with given parameters. This will compare the following methods:
-    - TM-Unweighted: unweighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
-    - TM-Weighted: weighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
-    - TM-Weighted→NN: frozen weighted TM trained for rounds*epochs_per_round / 2 epochs, then NN
+    - UTM: unweighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
+    - WTM: weighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
+    - WTM→NN: frozen weighted TM trained for rounds*epochs_per_round / 2 epochs, then NN
         trained on top for rounds*epochs_per_round / 2 epochs
-    - TM-Unweighted→NN: frozen unweighted TM trained for rounds*epochs_per_round / 2 epochs, then
+    - UTM→NN: frozen unweighted TM trained for rounds*epochs_per_round / 2 epochs, then
         NN trained on top for rounds*epochs_per_round / 2 epochs
-    - Alternating (TM⟷NN): start with weighted TM, alternate between TM and NN every
+    - Cyclic (TM⟷NN): start with weighted TM, alternate between TM and NN every
         epochs_per_round epochs. Each round: NN is initialized from the TM's current clause weights,
         trained for epochs_per_round epochs, then weights are copied back to the TM.
 
@@ -268,33 +344,35 @@ def run_experiment(
     toward — show it as a footnote or secondary column, not the headline number.
     Final TM accuracy is always measured with scaled weights (scale_weights_for_tm applied first).
 
-    PER-EPOCH ACCURACY CURVE (alternating method):
+    PER-EPOCH ACCURACY CURVE (cyclic method):
     Use two line styles on the same axis:
     - Solid line: model_type == "tm" (TM is actively being trained)
     - Dashed line: model_type == "nn" (NN is being trained, TM frozen)
     - is_sync == True marks where NN weights are scaled and copied back to the TM
     The TM accuracy stays flat during dashed segments and jumps at each sync point, producing a
-    staircase shape that visually communicates the alternating mechanic. Add shaded regions or rug
+    staircase shape that visually communicates the cyclic mechanic. Add shaded regions or rug
     ticks at sync points to make the jumps legible.
 
     RESULTS TABLE (suggested columns):
-    | Method            | Final TM Acc (avg last k epochs) | Time/Epoch (s) |
+    | Method            | Avg Last-10 TM Acc               | Time/Epoch (s) |
     |-------------------|----------------------------------|----------------|
-    | TM-Unweighted     |                                  |                |
-    | TM-Weighted       |                                  |                |
-    | TM-Unweighted→NN  |                                  |                |
-    | TM-Weighted→NN    |                                  |                |
-    | Alternating (ours)|                                  |                |
+    | UTM     |                                  |                |
+    | WTM       |                                  |                |
+    | UTM→NN  |                                  |                |
+    | WTM→NN    |                                  |                |
+    | Cyclic (ours)|                                  |                |
     Pair the table with a bar chart (one bar per method, final TM accuracy) for scannability.
-    The central claim: alternating wins on accuracy; the per-epoch curve shows why (continuous
+    The central claim: cyclic wins on accuracy; the per-epoch curve shows why (continuous
     bidirectional refinement vs. one-shot transfer).
     """
     n_classes = len(np.unique(y_train))
     total_epochs = rounds * epochs_per_round * 2
     #  check if the run directory already exists and results exist in it
-    if os.path.exists(os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}", "per_epoch_results.csv")):
+    if os.path.exists(os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}", "per_epoch_results.csv")) and os.path.exists(os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}", "summary_results.csv")):
         print(f"Run directory {os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}")} already exists and results exist in it. Skipping...")
-        return None, None
+        # return the per_epoch_results.csv and summary_results.csv
+        return pd.read_csv(os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}", "per_epoch_results.csv")), pd.read_csv(os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}", "summary_results.csv"))
+
     run_dir = os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}")
     os.makedirs(run_dir, exist_ok=True)
     split_one = int(total_epochs * split_point)
@@ -317,63 +395,63 @@ def run_experiment(
             })
         return start_epoch + len(epoch_results)
 
-# 5. Alternating
-    print(f"[5/5] Alternating TM⟷NN ({rounds} rounds × {epochs_per_round} epochs each phase)")
-    alternating_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True)
+# 5. Cyclic
+    print(f"[5/5] Cyclic TM⟷NN ({rounds} rounds × {epochs_per_round} epochs each phase)")
+    cyclic_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True)
     alt_epoch = 1
-    pbar = tqdm(range(rounds), desc="Alternating", dynamic_ncols=True, leave=False)
+    pbar = tqdm(range(rounds), desc="Cyclic", dynamic_ncols=True, leave=False)
     for rnd in pbar:
-        r_tm = train_tm(alternating_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round)
-        alt_epoch = _add("Alternating", r_tm, "tm", alt_epoch)
+        r_tm = train_tm(cyclic_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round)
+        alt_epoch = _add("Cyclic", r_tm, "tm", alt_epoch)
 
-        nn_a = LogWeightHead(n_classes=n_classes, n_clauses=alternating_tm.number_of_clauses,
-                             T=None, init_weights=alternating_tm.get_clause_weights())
-        r_nn = train_log_weight_head(nn_a, alternating_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round, patience=10)
-        alt_epoch = _add("Alternating", r_nn, "nn", alt_epoch)
+        nn_a = LogWeightHead(n_classes=n_classes, n_clauses=cyclic_tm.number_of_clauses,
+                             T=None, init_weights=cyclic_tm.get_clause_weights())
+        r_nn = train_log_weight_head(nn_a, cyclic_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round, patience=10)
+        alt_epoch = _add("Cyclic", r_nn, "nn", alt_epoch)
 
-        Z_test_a = alternating_tm.transform(x_test, inverted=False).astype("uint8")
-        scaled_weights = scale_weights_for_tm(nn_a, Z_test_a, alternating_tm.T)
-        alternating_tm.set_clause_weights(scaled_weights)
+        Z_test_a = cyclic_tm.transform(x_test, inverted=False).astype("uint8")
+        scaled_weights = scale_weights_for_tm(nn_a, Z_test_a, cyclic_tm.T)
+        cyclic_tm.set_clause_weights(scaled_weights)
 
         # copy unscaled weights back so next TM round has a warm start
-        alternating_tm.set_clause_weights(nn_a.weights.detach().cpu().numpy())
+        cyclic_tm.set_clause_weights(nn_a.weights.detach().cpu().numpy())
     pbar.close()
 
-    # 1. TM-Unweighted
-    print(f"[1/5] Training TM-Unweighted for {total_epochs} epochs")
+    # 1. UTM
+    print(f"[1/5] Training UTM for {total_epochs} epochs")
     unweighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=False)
     r_u1 = train_tm(unweighted_tm, x_train, y_train, x_test, y_test, epochs=split_one)
     pkl.dump(unweighted_tm, open(unweighted_tm_path, "wb"))
     r_u2 = train_tm(unweighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
-    _add("TM-Unweighted", r_u1 + r_u2, "tm", 1)
+    _add("UTM", r_u1 + r_u2, "tm", 1)
 
-    # 2. TM-Weighted
-    print(f"[2/5] Training TM-Weighted for {total_epochs} epochs")
+    # 2. WTM
+    print(f"[2/5] Training WTM for {total_epochs} epochs")
     weighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True)
     r_w1 = train_tm(weighted_tm, x_train, y_train, x_test, y_test, epochs=split_one)
     pkl.dump(weighted_tm, open(weighted_tm_path, "wb"))
     r_w2 = train_tm(weighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
-    _add("TM-Weighted", r_w1 + r_w2, "tm", 1)
+    _add("WTM", r_w1 + r_w2, "tm", 1)
 
-    # 3. TM-Weighted→NN: reuse r_w1 as the TM phase (same checkpoint), then train NN
-    print(f"[3/5] Training TM-Weighted→NN (NN phase, {split_two} epochs)")
+    # 3. WTM→NN: reuse r_w1 as the TM phase (same checkpoint), then train NN
+    print(f"[3/5] Training WTM→NN (NN phase, {split_two} epochs)")
     frozen_weighted_tm = pkl.load(open(weighted_tm_path, "rb"))
     nn_w = LogWeightHead(n_classes=n_classes, n_clauses=frozen_weighted_tm.number_of_clauses,
                          T=None, init_weights=frozen_weighted_tm.get_clause_weights())
-    ep = _add("TM-Weighted→NN", r_w1, "tm", 1)
+    ep = _add("WTM→NN", r_w1, "tm", 1)
     r_nn_w = train_log_weight_head(nn_w, frozen_weighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
-    ep = _add("TM-Weighted→NN", r_nn_w, "nn", ep)
+    ep = _add("WTM→NN", r_nn_w, "nn", ep)
     Z_test_w = frozen_weighted_tm.transform(x_test, inverted=False).astype("uint8")
     scaled_weights = scale_weights_for_tm(nn_w, Z_test_w, frozen_weighted_tm.T)
     frozen_weighted_tm.set_clause_weights(scaled_weights)
 
-    # 4. TM-Unweighted→NN: reuse r_u1 as the TM phase, then train NN
-    print(f"[4/5] Training TM-Unweighted→NN (NN phase, {split_two} epochs)")
+    # 4. UTM→NN: reuse r_u1 as the TM phase, then train NN
+    print(f"[4/5] Training UTM→NN (NN phase, {split_two} epochs)")
     frozen_unweighted_tm = pkl.load(open(unweighted_tm_path, "rb"))
     nn_u = LogWeightHead(n_classes=n_classes, n_clauses=frozen_unweighted_tm.number_of_clauses, T=None)
-    ep = _add("TM-Unweighted→NN", r_u1, "tm", 1)
+    ep = _add("UTM→NN", r_u1, "tm", 1)
     r_nn_u = train_log_weight_head(nn_u, frozen_unweighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
-    ep = _add("TM-Unweighted→NN", r_nn_u, "nn", ep)
+    ep = _add("UTM→NN", r_nn_u, "nn", ep)
     Z_test_u = frozen_unweighted_tm.transform(x_test, inverted=False).astype("uint8")
     scaled_weights = scale_weights_for_tm(nn_u, Z_test_u, frozen_unweighted_tm.T)
     frozen_unweighted_tm.set_clause_weights(scaled_weights)
@@ -383,14 +461,14 @@ def run_experiment(
     # Inference time: single predict call on each final TM with scaled weights.
     # Scaling is a one-time training cost — deployed inference is just predict().
     if rounds > 0:
-        Z_test_a = alternating_tm.transform(x_test, inverted=False).astype("uint8")
-        alternating_tm.set_clause_weights(scale_weights_for_tm(nn_a, Z_test_a, alternating_tm.T))
+        Z_test_a = cyclic_tm.transform(x_test, inverted=False).astype("uint8")
+        cyclic_tm.set_clause_weights(scale_weights_for_tm(nn_a, Z_test_a, cyclic_tm.T))
     final_models = {
-        "TM-Unweighted":    unweighted_tm,
-        "TM-Weighted":      weighted_tm,
-        "TM-Weighted→NN":   frozen_weighted_tm,
-        "TM-Unweighted→NN": frozen_unweighted_tm,
-        "Alternating":      alternating_tm,
+        "UTM":    unweighted_tm,
+        "WTM":      weighted_tm,
+        "WTM→NN":   frozen_weighted_tm,
+        "UTM→NN": frozen_unweighted_tm,
+        "Cyclic":      cyclic_tm,
     }
     # Randomize run order and repeat to get a reliable inference time estimate.
     _N_INFERENCE_REPS = 10
@@ -403,14 +481,20 @@ def run_experiment(
         inference_times[method].append(perf_counter() - t0)
     inference_times = {m: sum(v) / len(v) for m, v in inference_times.items()}
 
-    # Summary: best accuracy from per_epoch_df, inference time from timed predict calls.
-    methods_ordered = ["TM-Unweighted", "TM-Weighted", "TM-Weighted→NN", "TM-Unweighted→NN", "Alternating"]
+    # Summary: avg of last 10 relevant epochs, inference time from timed predict calls.
+    # For TM→NN methods: average last 10 NN epochs (they report TM acc via scaled weights).
+    # For Cyclic: average last 10 NN epochs (same row set as _last10_accuracy_rows).
+    # For pure TM methods: average last 10 TM epochs.
+    def _last10_avg_acc(method: str, mdf: pd.DataFrame) -> float:
+        return round(_last10_accuracy_rows(method, mdf)["test_accuracy"].mean(), 2)
+
+    methods_ordered = ["UTM", "WTM", "WTM→NN", "UTM→NN", "Cyclic"]
     summary_rows = []
     for method in methods_ordered:
         mdf = per_epoch_df[per_epoch_df["method"] == method]
         summary_rows.append({
             "method": method,
-            "best_tm_accuracy": round(mdf["test_accuracy"].max(), 2),
+            "avg_last10_tm_accuracy": _last10_avg_acc(method, mdf),
             "avg_tm_epoch_time_s": round(mdf[mdf["model_type"] == "tm"]["train_time"].mean(), 3),
             "inference_time_s": round(inference_times[method], 4),
             "total_train_time_s": round(mdf["train_time"].sum(), 2),
@@ -435,7 +519,7 @@ def plot_results(
     s: float = None,
     dataset_name: str = "MNIST",
 ) -> None:
-    methods = ["TM-Unweighted", "TM-Weighted", "TM-Weighted→NN", "TM-Unweighted→NN", "Alternating"]
+    methods = ["WTM→NN", "UTM→NN", "UTM", "WTM", "Cyclic"]
     prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     color_map = {m: prop_cycle[i % len(prop_cycle)] for i, m in enumerate(methods)}
 
@@ -503,15 +587,15 @@ def plot_results(
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
                     fmt.format(v), ha="center", va="bottom", fontsize=9)
 
-    # --- best accuracy bar chart (top-right) ---
-    accuracies = summary_df["best_tm_accuracy"].tolist()
-    _bar(ax_bar, accuracies, "Best TM Accuracy (%)", "Best TM Accuracy by Method", "{:.1f}%")
+    # --- avg last-10 accuracy bar chart (top-right) ---
+    accuracies = summary_df["avg_last10_tm_accuracy"].tolist()
+    _bar(ax_bar, accuracies, "Avg Last-10 TM Accuracy (%)", "Avg Last-10 TM Accuracy by Method", "{:.1f}%")
     lo, hi = min(accuracies), max(accuracies)
     ax_bar.set_ylim(lo - (hi - lo) * 0.5, hi + (hi - lo) * 0.2)
 
     # --- inference time bar chart (bottom-left) ---
     _bar(ax_time, summary_df["inference_time_s"].tolist(),
-         "Inference Time (s)", "Inference Time (single predict call)", "{:.3f}s")
+         "Inference Time (s)", "Inference Time", "{:.3f}s")
 
     # --- total training time bar chart (bottom-right) ---
     _bar(ax_train, summary_df["total_train_time_s"].tolist(),
@@ -565,9 +649,18 @@ if __name__ == "__main__":
     Findings:
     - at all clause levels, using the NN on top of the TM gives significant higher accuracy than the TM alone
     - low and high clause levels
-    - alternating TM/NN is better than frozen TM at base
+    - cyclic TM/NN is better than frozen TM at base
     - Good results at C=50, T=12.5, s=4.0, 15 rounds of 15. Also with C=20, T=5, s=3.0, 15 rounds of 15.
     - Gains are higher at low clause levels, marginal at high clause levels
+
+
+    Best per dataset:
+    - EMNIST: C=300
+    - FashionMNIST: C=100
+    - KMNIST: C=100 for gain, C=1000 for accuracy
+    - MNIST: C=100 for gain, C=500
+
+
     """
 
     C = 400
@@ -583,22 +676,65 @@ if __name__ == "__main__":
     MNISTDataset = CustomDataset(name="MNIST", train_dataset=MNIST(root="data", train=True, download=True), test_dataset=MNIST(root="data", train=False, download=True))
     KMNISTDataset = CustomDataset(name="KMNIST", train_dataset=KMNIST(root="data", train=True, download=True), test_dataset=KMNIST(root="data", train=False, download=True))
     
-    datasets = [EMNISTDataset, FashionMNISTDataset, MNISTDataset, KMNISTDataset]
-    #random.shuffle(datasets)
+    pairs = [
+        (EMNISTDataset, 300, 5),
+        (FashionMNISTDataset, 100, 5),
+        (KMNISTDataset, 100, 5),
+        (MNISTDataset, 100, 5)
+    ]
 
-    for dataset in datasets:
-        for C in [25, 50, 100, 300, 500, 1000]:
-            T = C // 4
-            print(f"Running experiment for {dataset.name} with C={C}, T={T}, s={s}")
+    for dataset, C, seeds in pairs:
+        T = C // 4
+        s = 4.0
+
+        per_epoch_dfs = []
+        summary_dfs = []
+
+        for i in range(seeds):
+            print(f"Running experiment for {dataset.name} with C={C}, T={T}, s={s}, seed {i+1} of {seeds}")
             config = ExperimentConfig(
                 C=C, T=T, s=s,
-                number_of_state_bits=number_of_state_bits,
                 rounds=rounds,
+                number_of_state_bits=number_of_state_bits,
                 epochs_per_round=epochs_per_round,
                 split_point=split_point,
-                dataset_name=dataset.name,
+                dataset_name=f"{dataset.name}_r{i}",
                 train_dataset=dataset.train_dataset,
                 test_dataset=dataset.test_dataset,
                 save_path="results",
             )
-            config.run()
+            per_epoch_df, summary_df = config.run()
+            per_epoch_dfs.append(per_epoch_df)
+            summary_dfs.append(summary_df)
+
+        aggregate_experiment_results(
+            dataset_name=dataset.name,
+            per_epoch_dfs=per_epoch_dfs,
+            summary_dfs=summary_dfs,
+            save_path="results",
+        )
+
+
+    """
+    datasets = [EMNISTDataset, FashionMNISTDataset, MNISTDataset, KMNISTDataset]
+    #random.shuffle(datasets)
+    C_values = [25, 50, 100, 300, 500, 1000]
+    permutes = list(itertools.product(datasets, C_values))
+    random.shuffle(permutes)
+
+    for dataset, C in permutes:
+        T = C // 4
+        print(f"Running experiment for {dataset.name} with C={C}, T={T}, s={s}")
+        config = ExperimentConfig(
+            C=C, T=T, s=s,
+            number_of_state_bits=number_of_state_bits,
+            rounds=rounds,
+            epochs_per_round=epochs_per_round,
+            split_point=split_point,
+            dataset_name=dataset.name,
+            train_dataset=dataset.train_dataset,
+            test_dataset=dataset.test_dataset,
+            save_path="results",
+        )
+        config.run()
+    """

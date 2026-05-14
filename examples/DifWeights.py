@@ -220,20 +220,6 @@ def train_log_weight_head(
     model.theta.data.copy_(best_theta)
     return results
 
-
-def _last10_accuracy_rows(method: str, mdf: pd.DataFrame) -> pd.DataFrame:
-    """Rows used for avg_last10_tm_accuracy (same logic as run_experiment summary)."""
-    if method in ("WTM-NN", "UTM-NN", "Cyclic"):
-        sub = mdf[mdf["model_type"] == "nn"]
-    else:
-        sub = mdf[mdf["model_type"] == "tm"]
-    return sub.sort_values("epoch").tail(10)
-
-
-def _last10_avg_accuracy(method: str, mdf: pd.DataFrame) -> float:
-    return round(float(_last10_accuracy_rows(method, mdf)["test_accuracy"].mean()), 2)
-
-
 def aggregate_experiment_results(
     dataset_name: str,
     per_epoch_dfs: list[pd.DataFrame],
@@ -249,7 +235,7 @@ def aggregate_experiment_results(
     Per method: mean and sample std (ddof=1).
     - avg_last10_tm_accuracy: same last-10 rows as run_experiment (_last10_accuracy_rows);
       pool test_accuracy across runs - 10 * n_seeds values.
-    - avg_tm_epoch_time_s, inference_time_s, total_train_time_s: recomputed / read like
+    - avg_tm_epoch_time_s, avg_last10_tm_test_time_s, total_train_time_s: recomputed / read like
       run_experiment summary (one scalar per run) - n_seeds values each.
 
     Optional kwargs total_epochs, T, s, split_point are copied into every output row (same
@@ -274,10 +260,10 @@ def aggregate_experiment_results(
         tot_vals: list[float] = []
         for pe_df, su_df in zip(per_epoch_dfs, summary_dfs):
             mdf = pe_df[pe_df["method"] == method]
-            acc_vals.extend(_last10_accuracy_rows(method, mdf)["test_accuracy"].astype(float).tolist())
+            acc_vals.extend(mdf["test_accuracy"].tail(10).astype(float).tolist())
             tm_train_vals.append(float(mdf[mdf["model_type"] == "tm"]["train_time"].mean()))
             srow = su_df[su_df["method"] == method].iloc[0]
-            inf_vals.append(float(srow["inference_time_s"]))
+            inf_vals.append(float(srow["avg_last10_tm_test_time_s"]))
             tot_vals.append(float(srow["total_train_time_s"]))
 
         out_rows.append({
@@ -293,8 +279,8 @@ def aggregate_experiment_results(
             "avg_last10_tm_accuracy_std": round(_std(acc_vals), 4),
             "avg_tm_epoch_time_s_mean": round(float(np.mean(tm_train_vals)), 4),
             "avg_tm_epoch_time_s_std": round(_std(tm_train_vals), 4),
-            "inference_time_s_mean": round(float(np.mean(inf_vals)), 4),
-            "inference_time_s_std": round(_std(inf_vals), 4),
+            "avg_last10_tm_test_time_s_mean": round(float(np.mean(inf_vals)), 4),
+            "avg_last10_tm_test_time_s_std": round(_std(inf_vals), 4),
             "total_train_time_s_mean": round(float(np.mean(tot_vals)), 2),
             "total_train_time_s_std": round(_std(tot_vals), 2),
         })
@@ -483,7 +469,7 @@ def run_experiment(
             })
         return start_epoch + len(epoch_results)
 
-# 5. Cyclic
+    # 5. Cyclic
     print(f"[5/5] Cyclic TM⟷NN ({rounds} rounds × {epochs_per_round} epochs each phase)")
     cyclic_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True)
     alt_epoch = 1
@@ -558,17 +544,7 @@ def run_experiment(
         "UTM-NN": frozen_unweighted_tm,
         "Cyclic":      cyclic_tm,
     }
-    # Randomize run order and repeat to get a reliable inference time estimate.
-    _N_INFERENCE_REPS = 10
-    inference_times = {m: [] for m in final_models}
-    run_order = list(final_models.items()) * _N_INFERENCE_REPS
-    random.shuffle(run_order)
-    for method, tm_model in run_order:
-        t0 = perf_counter()
-        tm_model.predict(x_test)
-        inference_times[method].append(perf_counter() - t0)
-    inference_times = {m: sum(v) / len(v) for m, v in inference_times.items()}
-
+    
     # Summary: avg of last 10 relevant epochs, inference time from timed predict calls.
     # For TM-NN methods: average last 10 NN epochs (they report TM acc via scaled weights).
     # For Cyclic: average last 10 NN epochs (same row set as _last10_accuracy_rows).
@@ -578,9 +554,9 @@ def run_experiment(
         mdf = per_epoch_df[per_epoch_df["method"] == method]
         summary_rows.append({
             "method": method,
-            "avg_last10_tm_accuracy": _last10_avg_accuracy(method, mdf),
+            "avg_last10_tm_accuracy": round(float(mdf["test_accuracy"].tail(10).mean()), 2),
             "avg_tm_epoch_time_s": round(mdf[mdf["model_type"] == "tm"]["train_time"].mean(), 3),
-            "inference_time_s": round(inference_times[method], 4),
+            "avg_last10_tm_test_time_s": round(mdf["test_time"].tail(10).mean(), 4),
             "total_train_time_s": round(mdf["train_time"].sum(), 2),
         })
     summary_df = pd.DataFrame(summary_rows)
@@ -689,12 +665,12 @@ def plot_results(
     ax_bar.set_ylim(lo - (hi - lo) * 0.5, hi + (hi - lo) * 0.2)
 
     # --- inference time bar chart (bottom-left) ---
-    _bar(ax_time, summary_df["inference_time_s"].tolist(),
-         "Inference Time (s)", "Inference Time", "{:.3f}s")
+    _bar(ax_time, summary_df["avg_last10_tm_test_time_s"].tolist(),
+         "Inference Time (s)", "Avg Last-10 TM Inference Time", "{:.3f}s")
 
     # --- total training time bar chart (bottom-right) ---
     _bar(ax_train, summary_df["total_train_time_s"].tolist(),
-         "Total Training Time (s)", "Total Training Time by Method", "{:.1f}s")
+         "Training Time (s)", "Total Training Time by Method", "{:.1f}s")
 
     plt.tight_layout()
     out_path = os.path.join(save_path, "results.png")
@@ -771,10 +747,10 @@ if __name__ == "__main__":
     KMNISTDataset = CustomDataset(name="KMNIST", train_dataset=KMNIST(root="data", train=True, download=True), test_dataset=KMNIST(root="data", train=False, download=True))
     
     pairs = [
-        (EMNISTDataset, 300, 5),
+        (MNISTDataset, 100, 5)
         (FashionMNISTDataset, 100, 5),
         (KMNISTDataset, 100, 5),
-        (MNISTDataset, 100, 5)
+        (EMNISTDataset, 300, 5),
     ]
 
     for dataset, C, seeds in pairs:

@@ -35,6 +35,21 @@ METHODS_ORDERED = ("UTM", "WTM", "WTM-NN", "UTM-NN", "Cyclic")
 METHODS_PLOT_ORDER = ("WTM-NN", "UTM-NN", "UTM", "WTM", "Cyclic")
 
 
+def compute_summary_df(per_epoch_df: pd.DataFrame) -> pd.DataFrame:
+    """One row per METHODS_ORDERED; must match run_experiment summary CSV columns."""
+    summary_rows = []
+    for method in METHODS_ORDERED:
+        mdf = per_epoch_df[per_epoch_df["method"] == method]
+        summary_rows.append({
+            "method": method,
+            "avg_last10_tm_accuracy": round(float(mdf["test_accuracy"].tail(10).mean()), 2),
+            "avg_tm_epoch_time_s": round(mdf[mdf["model_type"] == "tm"]["train_time"].mean(), 3),
+            "avg_last10_tm_test_time_s": round(mdf["test_time"].tail(10).mean(), 4),
+            "total_train_time_s": round(mdf["train_time"].sum(), 2),
+        })
+    return pd.DataFrame(summary_rows)
+
+
 def binarize_dataset(train: Dataset, test: Dataset) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     
     x_train = np.where(train.data.numpy() > THRESHOLD, 1, 0).reshape(-1, 28 * 28).astype(np.uint32)
@@ -233,7 +248,7 @@ def aggregate_experiment_results(
 ) -> pd.DataFrame:
     """
     Per method: mean and sample std (ddof=1).
-    - avg_last10_tm_accuracy: same last-10 rows as run_experiment (_last10_accuracy_rows);
+    - avg_last10_tm_accuracy: last 10 rows of test_accuracy per method/run (same rule as compute_summary_df);
       pool test_accuracy across runs - 10 * n_seeds values.
     - avg_tm_epoch_time_s, avg_last10_tm_test_time_s, total_train_time_s: recomputed / read like
       run_experiment summary (one scalar per run) - n_seeds values each.
@@ -297,6 +312,223 @@ def aggregate_experiment_results(
 EXPERIMENT_METADATA_FILENAME = "experiment_metadata.json"
 EXPERIMENT_METADATA_SCHEMA_VERSION = 1
 
+# Five PNGs per run (no results.png): four singles + one 2x2 combined.
+PLOT_PER_EPOCH_ACCURACY_PNG = "plot_per_epoch_accuracy.png"
+PLOT_AVG_LAST10_ACCURACY_PNG = "plot_avg_last10_accuracy.png"
+PLOT_AVG_LAST10_TM_TEST_TIME_PNG = "plot_avg_last10_tm_test_time.png"
+PLOT_TOTAL_TRAIN_TIME_PNG = "plot_total_train_time.png"
+PLOT_COMBINED_PNG = "plot_combined.png"
+
+_SERIF_RCPARAMS = {
+    "font.family": "serif",
+    "font.serif": ["Times New Roman", "DejaVu Serif", "Bitstream Vera Serif", "Computer Modern Roman", "serif"],
+    "mathtext.fontset": "dejavuserif",
+}
+
+
+def _plot_color_map() -> dict[str, str]:
+    prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    return {m: prop_cycle[i % len(prop_cycle)] for i, m in enumerate(METHODS_PLOT_ORDER)}
+
+
+def _hparam_legend_matching_bbox() -> dict:
+    """Text bbox props aligned with the default legend frame (same rcParams as ax.legend)."""
+    rp = plt.rcParams
+    fc = rp["legend.facecolor"]
+    if fc == "inherit":
+        fc = rp["axes.facecolor"]
+    pad = float(rp["legend.borderpad"])
+    boxstyle = f"round,pad={pad}" if rp["legend.fancybox"] else f"square,pad={pad}"
+    return {
+        "boxstyle": boxstyle,
+        "facecolor": fc,
+        "edgecolor": rp["legend.edgecolor"],
+        "linewidth": float(rp["axes.linewidth"]),
+        "alpha": float(rp["legend.framealpha"]),
+    }
+
+
+def _annotate_hyperparams_bottom_right(ax, meta: dict) -> None:
+    """C, T, s in axes lower-right (left-justified block; anchor is lower-left of text)."""
+    text = f"C = {meta['C']}\nT = {meta['T']}\ns = {meta['s']}"
+    ax.text(
+        0.9, 0.02, text, transform=ax.transAxes, fontsize=9,
+        horizontalalignment="left", verticalalignment="bottom", multialignment="left", bbox=_hparam_legend_matching_bbox(),
+    )
+
+
+def _annotate_hyperparams_epoch_left_of_legend(ax, meta: dict) -> None:
+    """C, T, s left-justified, lower area to the left of the lower-right legend."""
+    text = f"C = {meta['C']}\nT = {meta['T']}\ns = {meta['s']}"
+    ax.text(
+        0.72, 0.02, text, transform=ax.transAxes, fontsize=9,
+        horizontalalignment="left", verticalalignment="bottom", multialignment="left", bbox=_hparam_legend_matching_bbox(),
+    )
+
+
+def _draw_per_epoch_accuracy_ax(ax, per_epoch_df: pd.DataFrame, color_map: dict[str, str]) -> None:
+    max_epoch = per_epoch_df["epoch"].max()
+    for method in METHODS_PLOT_ORDER:
+        color = color_map[method]
+        train_df = per_epoch_df[per_epoch_df["method"] == method].sort_values("epoch").reset_index(drop=True)
+        if train_df.empty:
+            continue
+        train_df = train_df.copy()
+        train_df["segment"] = (train_df["model_type"] != train_df["model_type"].shift()).cumsum()
+        first = True
+        for seg_id, seg in train_df.groupby("segment"):
+            ls = "--" if seg["model_type"].iloc[0] == "nn" else "-"
+            if seg_id > train_df["segment"].min():
+                prev = train_df[train_df["segment"] == seg_id - 1].iloc[-1]
+                epochs = [prev["epoch"]] + list(seg["epoch"])
+                accs = [prev["test_accuracy"]] + list(seg["test_accuracy"])
+            else:
+                epochs = list(seg["epoch"])
+                accs = list(seg["test_accuracy"])
+            ax.plot(epochs, accs, color=color, linestyle=ls, linewidth=1.5, label=method if first else "_nolegend_")
+            first = False
+        last = train_df.iloc[-1]
+        if last["epoch"] < max_epoch:
+            ax.plot(
+                [last["epoch"], max_epoch], [last["test_accuracy"]] * 2,
+                color=color, linestyle=":", linewidth=1.0, alpha=0.4,
+            )
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Test Accuracy (%)")
+    ax.set_title("Per-Epoch Accuracy")
+    ax.grid(True, alpha=0.3, zorder=0)
+    method_handles = [Line2D([0], [0], color=color_map[m], linewidth=1.5, label=m) for m in METHODS_PLOT_ORDER]
+    style_handles = [
+        Line2D([0], [0], color="black", linestyle="-", label="TM training"),
+        Line2D([0], [0], color="black", linestyle="--", label="NN training"),
+    ]
+    ax.legend(handles=method_handles + style_handles, fontsize=8, loc="lower right")
+
+
+def _draw_bar_metric_ax(
+    ax,
+    summary_df: pd.DataFrame,
+    color_map: dict[str, str],
+    value_col: str,
+    ylabel: str,
+    title: str,
+    fmt: str,
+    *,
+    expand_acc_ylim: bool = False,
+) -> None:
+    labels = summary_df["method"].tolist()
+    bar_colors = [color_map[m] for m in labels]
+    values = summary_df[value_col].tolist()
+    bars = ax.bar(range(len(labels)), values, color=bar_colors)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_axisbelow(True)
+    ax.grid(True, alpha=0.3, axis="y")
+    for bar, v in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), fmt.format(v), ha="center", va="bottom", fontsize=9)
+    if expand_acc_ylim:
+        lo, hi = min(values), max(values)
+        ax.set_ylim(lo - (hi - lo) * 0.5, hi + (hi - lo) * 0.2)
+
+
+def write_result_plots_from_run_dir(run_dir: str) -> None:
+    """
+    Read per_epoch_results.csv + experiment_metadata.json; compute summary in memory; write five PNGs.
+
+    Raises:
+        FileNotFoundError: if metadata or per-epoch CSV is missing.
+    """
+    meta_path = os.path.join(run_dir, EXPERIMENT_METADATA_FILENAME)
+    if not os.path.isfile(meta_path):
+        raise FileNotFoundError(
+            f"Missing {EXPERIMENT_METADATA_FILENAME!r} under {run_dir!r}; required for plots."
+        )
+    per_epoch_path = os.path.join(run_dir, "per_epoch_results.csv")
+    if not os.path.isfile(per_epoch_path):
+        raise FileNotFoundError(f"Missing per_epoch_results.csv under {run_dir!r}.")
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+    per_epoch_df = pd.read_csv(per_epoch_path)
+    summary_df = compute_summary_df(per_epoch_df)
+
+    with plt.rc_context(_SERIF_RCPARAMS):
+        color_map = _plot_color_map()
+
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_per_epoch_accuracy_ax(ax, per_epoch_df, color_map)
+        _annotate_hyperparams_epoch_left_of_legend(ax, meta)
+        p = os.path.join(run_dir, PLOT_PER_EPOCH_ACCURACY_PNG)
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved plot to {p}")
+
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_bar_metric_ax(
+            ax, summary_df, color_map, "avg_last10_tm_accuracy",
+            "Avg Last-10 TM Accuracy (%)", "Avg Last-10 TM Accuracy by Method", "{:.1f}%",
+            expand_acc_ylim=True,
+        )
+        _annotate_hyperparams_bottom_right(ax, meta)
+        p = os.path.join(run_dir, PLOT_AVG_LAST10_ACCURACY_PNG)
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved plot to {p}")
+
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_bar_metric_ax(
+            ax, summary_df, color_map, "avg_last10_tm_test_time_s",
+            "Inference Time (s)", "Avg Last-10 TM Inference Time", "{:.3f}s",
+        )
+        _annotate_hyperparams_bottom_right(ax, meta)
+        p = os.path.join(run_dir, PLOT_AVG_LAST10_TM_TEST_TIME_PNG)
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved plot to {p}")
+
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_bar_metric_ax(
+            ax, summary_df, color_map, "total_train_time_s",
+            "Training Time (s)", "Total Training Time by Method", "{:.1f}s",
+        )
+        _annotate_hyperparams_bottom_right(ax, meta)
+        p = os.path.join(run_dir, PLOT_TOTAL_TRAIN_TIME_PNG)
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved plot to {p}")
+
+        fig, ((ax_curve, ax_time), (ax_bar, ax_train)) = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle(f"TM vs TM⟷NN — {meta['dataset_name']}", fontsize=13, fontweight="bold")
+        _draw_per_epoch_accuracy_ax(ax_curve, per_epoch_df, color_map)
+        _annotate_hyperparams_epoch_left_of_legend(ax_curve, meta)
+        _draw_bar_metric_ax(
+            ax_bar, summary_df, color_map, "avg_last10_tm_accuracy",
+            "Avg Last-10 TM Accuracy (%)", "Avg Last-10 TM Accuracy by Method", "{:.1f}%",
+            expand_acc_ylim=True,
+        )
+        _annotate_hyperparams_bottom_right(ax_bar, meta)
+        _draw_bar_metric_ax(
+            ax_time, summary_df, color_map, "avg_last10_tm_test_time_s",
+            "Inference Time (s)", "Avg Last-10 TM Inference Time", "{:.3f}s",
+        )
+        _annotate_hyperparams_bottom_right(ax_time, meta)
+        _draw_bar_metric_ax(
+            ax_train, summary_df, color_map, "total_train_time_s",
+            "Training Time (s)", "Total Training Time by Method", "{:.1f}s",
+        )
+        _annotate_hyperparams_bottom_right(ax_train, meta)
+        plt.tight_layout()
+        p = os.path.join(run_dir, PLOT_COMBINED_PNG)
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved plot to {p}")
+
+
+def replot_from_run_dir(run_dir: str) -> None:
+    """Alias for write_result_plots_from_run_dir (reads only per_epoch CSV + metadata; not summary CSV)."""
+    write_result_plots_from_run_dir(run_dir)
+
 
 def write_experiment_metadata(
     run_dir: str,
@@ -327,27 +559,6 @@ def write_experiment_metadata(
     path = os.path.join(run_dir, EXPERIMENT_METADATA_FILENAME)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-
-
-def replot_from_run_dir(run_dir: str) -> None:
-    """
-    Reload per-epoch and summary CSVs plus experiment_metadata.json and rewrite results.png.
-
-    Raises:
-        FileNotFoundError: if experiment_metadata.json is missing (cannot recover plot kwargs).
-    """
-    meta_path = os.path.join(run_dir, EXPERIMENT_METADATA_FILENAME)
-    if not os.path.isfile(meta_path):
-        raise FileNotFoundError(
-            f"No {EXPERIMENT_METADATA_FILENAME} in {run_dir!r}; cannot replot without metadata. "
-            "Re-run the experiment once to generate metadata, or call plot_results with explicit parameters."
-        )
-    with open(meta_path, encoding="utf-8") as f:
-        meta = json.load(f)
-    per_epoch_df = pd.read_csv(os.path.join(run_dir, "per_epoch_results.csv"))
-    summary_df = pd.read_csv(os.path.join(run_dir, "summary_results.csv"))
-    plot_kw = {k: meta[k] for k in ("C", "T", "s", "dataset_name")}
-    plot_results(per_epoch_df, summary_df, run_dir, **plot_kw)
 
 
 def run_experiment(
@@ -421,31 +632,27 @@ def run_experiment(
     The central claim: cyclic wins on accuracy; the per-epoch curve shows why (continuous
     bidirectional refinement vs. one-shot transfer).
 
-    After a successful training run, writes experiment_metadata.json next to the CSVs so
-    results.png can be regenerated via replot_from_run_dir without retraining. If CSVs
-    already exist (skip branch) and results.png is missing, replot_from_run_dir is called
-    automatically only when experiment_metadata.json is present.
+    After a successful training run, writes experiment_metadata.json next to the CSVs.
+    Plots are written by write_result_plots_from_run_dir (five PNGs from per_epoch CSV + metadata).
+    On skip (cached CSVs), plots are always regenerated; metadata must exist or FileNotFoundError is raised.
     """
     n_classes = len(np.unique(y_train))
     total_epochs = rounds * epochs_per_round * 2
     run_dir = os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}")
     per_epoch_csv = os.path.join(run_dir, "per_epoch_results.csv")
     summary_csv = os.path.join(run_dir, "summary_results.csv")
-    results_png = os.path.join(run_dir, "results.png")
     metadata_json = os.path.join(run_dir, EXPERIMENT_METADATA_FILENAME)
 
     if os.path.isfile(per_epoch_csv) and os.path.isfile(summary_csv):
         print(f"Run directory {run_dir} already exists and CSV results are present. Skipping training...")
+        if not os.path.isfile(metadata_json):
+            raise FileNotFoundError(
+                f"Missing {EXPERIMENT_METADATA_FILENAME!r} under {run_dir!r}; required to regenerate plots. "
+                "Re-run training once for this configuration."
+            )
         per_epoch_df = pd.read_csv(per_epoch_csv)
-        summary_df = pd.read_csv(summary_csv)
-        if not os.path.isfile(results_png):
-            if os.path.isfile(metadata_json):
-                replot_from_run_dir(run_dir)
-            else:
-                print(
-                    f"results.png is missing under {run_dir!r} and {EXPERIMENT_METADATA_FILENAME} was not found; "
-                    "cannot auto-replot. Re-run the experiment once to emit metadata, or call plot_results manually."
-                )
+        summary_df = compute_summary_df(per_epoch_df)
+        write_result_plots_from_run_dir(run_dir)
         return per_epoch_df, summary_df
 
     os.makedirs(run_dir, exist_ok=True)
@@ -545,21 +752,7 @@ def run_experiment(
         "Cyclic":      cyclic_tm,
     }
     
-    # Summary: avg of last 10 relevant epochs, inference time from timed predict calls.
-    # For TM-NN methods: average last 10 NN epochs (they report TM acc via scaled weights).
-    # For Cyclic: average last 10 NN epochs (same row set as _last10_accuracy_rows).
-    # For pure TM methods: average last 10 TM epochs.
-    summary_rows = []
-    for method in METHODS_ORDERED:
-        mdf = per_epoch_df[per_epoch_df["method"] == method]
-        summary_rows.append({
-            "method": method,
-            "avg_last10_tm_accuracy": round(float(mdf["test_accuracy"].tail(10).mean()), 2),
-            "avg_tm_epoch_time_s": round(mdf[mdf["model_type"] == "tm"]["train_time"].mean(), 3),
-            "avg_last10_tm_test_time_s": round(mdf["test_time"].tail(10).mean(), 4),
-            "total_train_time_s": round(mdf["train_time"].sum(), 2),
-        })
-    summary_df = pd.DataFrame(summary_rows)
+    summary_df = compute_summary_df(per_epoch_df)
 
     per_epoch_df.to_csv(os.path.join(run_dir, "per_epoch_results.csv"), index=False)
     summary_df.to_csv(os.path.join(run_dir, "summary_results.csv"), index=False)
@@ -577,106 +770,10 @@ def run_experiment(
         split_point=split_point,
         total_epochs=total_epochs,
     )
-    plot_results(per_epoch_df, summary_df, run_dir, C=C, T=T, s=s, dataset_name=dataset_name)
+    write_result_plots_from_run_dir(run_dir)
 
     return per_epoch_df, summary_df
 
-
-def plot_results(
-    per_epoch_df: pd.DataFrame,
-    summary_df: pd.DataFrame,
-    save_path: str,
-    C: int = None,
-    T: int = None,
-    s: float = None,
-    dataset_name: str = "MNIST",
-) -> None:
-    prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    color_map = {m: prop_cycle[i % len(prop_cycle)] for i, m in enumerate(METHODS_PLOT_ORDER)}
-
-    fig, ((ax_curve, ax_time), (ax_bar, ax_train)) = plt.subplots(2, 2, figsize=(14, 10))
-
-    fig.suptitle(f"TM vs TM⟷NN — {dataset_name}", fontsize=13, fontweight="bold")
-
-    # --- per-epoch accuracy curve (top-left) ---
-    max_epoch = per_epoch_df["epoch"].max()
-    for method in METHODS_PLOT_ORDER:
-        color = color_map[method]
-        train_df = per_epoch_df[per_epoch_df["method"] == method].sort_values("epoch").reset_index(drop=True)
-        if train_df.empty:
-            continue
-
-        train_df["segment"] = (train_df["model_type"] != train_df["model_type"].shift()).cumsum()
-        first = True
-        for seg_id, seg in train_df.groupby("segment"):
-            ls = "--" if seg["model_type"].iloc[0] == "nn" else "-"
-            if seg_id > train_df["segment"].min():
-                prev = train_df[train_df["segment"] == seg_id - 1].iloc[-1]
-                epochs = [prev["epoch"]] + list(seg["epoch"])
-                accs   = [prev["test_accuracy"]] + list(seg["test_accuracy"])
-            else:
-                epochs = list(seg["epoch"])
-                accs   = list(seg["test_accuracy"])
-            ax_curve.plot(epochs, accs, color=color, linestyle=ls, linewidth=1.5,
-                          label=method if first else "_nolegend_")
-            first = False
-
-        # Extend to max_epoch with a faint dotted line so methods that end early don't leave gaps.
-        last = train_df.iloc[-1]
-        if last["epoch"] < max_epoch:
-            ax_curve.plot([last["epoch"], max_epoch], [last["test_accuracy"]] * 2,
-                          color=color, linestyle=":", linewidth=1.0, alpha=0.4)
-
-    ax_curve.set_xlabel("Epoch")
-    ax_curve.set_ylabel("Test Accuracy (%)")
-    ax_curve.set_title("Per-Epoch Accuracy")
-    ax_curve.grid(True, alpha=0.3, zorder=0)
-
-    if C is not None:
-        param_text = f"C = {C}\nT = {T}\ns = {s}"
-        ax_curve.text(0.02, 0.97, param_text, transform=ax_curve.transAxes,
-                      fontsize=9, verticalalignment="top",
-                      bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="gray", alpha=0.8))
-
-    method_handles = [Line2D([0], [0], color=color_map[m], linewidth=1.5, label=m) for m in METHODS_PLOT_ORDER]
-    style_handles  = [Line2D([0], [0], color="black", linestyle="-",  label="TM training"),
-                      Line2D([0], [0], color="black", linestyle="--", label="NN training")]
-    ax_curve.legend(handles=method_handles + style_handles, fontsize=8, loc="lower right")
-
-    labels     = summary_df["method"].tolist()
-    bar_colors = [color_map[m] for m in labels]
-
-    def _bar(ax, values, ylabel, title, fmt):
-        bars = ax.bar(range(len(labels)), values, color=bar_colors)
-        ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.set_axisbelow(True)
-        ax.grid(True, alpha=0.3, axis="y")
-        for bar, v in zip(bars, values):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                    fmt.format(v), ha="center", va="bottom", fontsize=9)
-
-    # --- avg last-10 accuracy bar chart (top-right) ---
-    accuracies = summary_df["avg_last10_tm_accuracy"].tolist()
-    _bar(ax_bar, accuracies, "Avg Last-10 TM Accuracy (%)", "Avg Last-10 TM Accuracy by Method", "{:.1f}%")
-    lo, hi = min(accuracies), max(accuracies)
-    ax_bar.set_ylim(lo - (hi - lo) * 0.5, hi + (hi - lo) * 0.2)
-
-    # --- inference time bar chart (bottom-left) ---
-    _bar(ax_time, summary_df["avg_last10_tm_test_time_s"].tolist(),
-         "Inference Time (s)", "Avg Last-10 TM Inference Time", "{:.3f}s")
-
-    # --- total training time bar chart (bottom-right) ---
-    _bar(ax_train, summary_df["total_train_time_s"].tolist(),
-         "Training Time (s)", "Total Training Time by Method", "{:.1f}s")
-
-    plt.tight_layout()
-    out_path = os.path.join(save_path, "results.png")
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    print(f"Saved plot to {out_path}")
-    plt.close()
 
 @dataclass
 class CustomDataset:
@@ -747,7 +844,7 @@ if __name__ == "__main__":
     KMNISTDataset = CustomDataset(name="KMNIST", train_dataset=KMNIST(root="data", train=True, download=True), test_dataset=KMNIST(root="data", train=False, download=True))
     
     pairs = [
-        (MNISTDataset, 100, 5)
+        (MNISTDataset, 100, 5),
         (FashionMNISTDataset, 100, 5),
         (KMNISTDataset, 100, 5),
         (EMNISTDataset, 300, 5),

@@ -1,14 +1,14 @@
-import copy
+import json
 import random
+from datetime import datetime, timezone
 from time import perf_counter
 from dataclasses import dataclass
 from typing import Tuple
 import numpy as np
 from pyTsetlinMachineParallel.tm import MultiClassTsetlinMachine
 from torchvision.datasets import MNIST, EMNIST, KMNIST, FashionMNIST
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 from tqdm import tqdm
-from torch.utils.data import DataLoader, TensorDataset
 
 import torch
 import torch.nn as nn
@@ -21,20 +21,19 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
-@dataclass
-class TMConfig:
-    C: int
-    T: int
-    s: float
-    weighted_clauses: bool
-    number_of_state_bits: int
-
 # Per-epoch training metrics returned by train_tm / train_log_weight_head.
 # Each list element is one epoch, in order. Keys are floats (seconds for times).
 EpochResult = dict[str, float]
 # Keys: "test_accuracy" (percent 0-100), "test_time" (s), "train_time" (s).
 
 THRESHOLD = 75
+
+# Summary table / aggregate order (also default row order in summary CSV).
+METHODS_ORDERED = ("UTM", "WTM", "WTM-NN", "UTM-NN", "Cyclic")
+
+# Per-epoch curve legend and color assignment (intentionally not METHODS_ORDERED).
+METHODS_PLOT_ORDER = ("WTM-NN", "UTM-NN", "UTM", "WTM", "Cyclic")
+
 
 def binarize_dataset(train: Dataset, test: Dataset) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     
@@ -224,11 +223,15 @@ def train_log_weight_head(
 
 def _last10_accuracy_rows(method: str, mdf: pd.DataFrame) -> pd.DataFrame:
     """Rows used for avg_last10_tm_accuracy (same logic as run_experiment summary)."""
-    if method in ("WTM→NN", "UTM→NN", "Cyclic"):
+    if method in ("WTM-NN", "UTM-NN", "Cyclic"):
         sub = mdf[mdf["model_type"] == "nn"]
     else:
         sub = mdf[mdf["model_type"] == "tm"]
     return sub.sort_values("epoch").tail(10)
+
+
+def _last10_avg_accuracy(method: str, mdf: pd.DataFrame) -> float:
+    return round(float(_last10_accuracy_rows(method, mdf)["test_accuracy"].mean()), 2)
 
 
 def aggregate_experiment_results(
@@ -236,15 +239,22 @@ def aggregate_experiment_results(
     per_epoch_dfs: list[pd.DataFrame],
     summary_dfs: list[pd.DataFrame],
     save_path: str,
+    *,
+    total_epochs: int | None = None,
+    T: int | None = None,
+    s: float | None = None,
+    split_point: float | None = None,
 ) -> pd.DataFrame:
     """
     Per method: mean and sample std (ddof=1).
     - avg_last10_tm_accuracy: same last-10 rows as run_experiment (_last10_accuracy_rows);
-      pool test_accuracy across runs → 10 * n_seeds values.
+      pool test_accuracy across runs - 10 * n_seeds values.
     - avg_tm_epoch_time_s, inference_time_s, total_train_time_s: recomputed / read like
-      run_experiment summary (one scalar per run) → n_seeds values each.
+      run_experiment summary (one scalar per run) - n_seeds values each.
+
+    Optional kwargs total_epochs, T, s, split_point are copied into every output row (same
+    experiment config for all seeds); omit or pass None to leave those CSV cells blank.
     """
-    methods_ordered = ["UTM", "WTM", "WTM→NN", "UTM→NN", "Cyclic"]
     n = len(per_epoch_dfs)
     if n == 0:
         raise ValueError("aggregate_experiment_results: no runs")
@@ -257,7 +267,7 @@ def aggregate_experiment_results(
         return float(np.std(vals, ddof=1))
 
     out_rows = []
-    for method in methods_ordered:
+    for method in METHODS_ORDERED:
         acc_vals: list[float] = []
         tm_train_vals: list[float] = []
         inf_vals: list[float] = []
@@ -272,6 +282,10 @@ def aggregate_experiment_results(
 
         out_rows.append({
             "dataset": dataset_name,
+            "total_epochs": total_epochs,
+            "T": T,
+            "s": s,
+            "split_point": split_point,
             "method": method,
             "n_seeds": n,
             "n_pooled_accuracy_epochs": len(acc_vals),
@@ -294,6 +308,62 @@ def aggregate_experiment_results(
     return agg_df
 
 
+EXPERIMENT_METADATA_FILENAME = "experiment_metadata.json"
+EXPERIMENT_METADATA_SCHEMA_VERSION = 1
+
+
+def write_experiment_metadata(
+    run_dir: str,
+    *,
+    C: int,
+    T: int,
+    s: float,
+    dataset_name: str,
+    number_of_state_bits: int,
+    rounds: int,
+    epochs_per_round: int,
+    split_point: float,
+    total_epochs: int,
+) -> None:
+    payload = {
+        "schema_version": EXPERIMENT_METADATA_SCHEMA_VERSION,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "C": C,
+        "T": T,
+        "s": float(s),
+        "dataset_name": dataset_name,
+        "number_of_state_bits": number_of_state_bits,
+        "rounds": rounds,
+        "epochs_per_round": epochs_per_round,
+        "split_point": float(split_point),
+        "total_epochs": total_epochs,
+    }
+    path = os.path.join(run_dir, EXPERIMENT_METADATA_FILENAME)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def replot_from_run_dir(run_dir: str) -> None:
+    """
+    Reload per-epoch and summary CSVs plus experiment_metadata.json and rewrite results.png.
+
+    Raises:
+        FileNotFoundError: if experiment_metadata.json is missing (cannot recover plot kwargs).
+    """
+    meta_path = os.path.join(run_dir, EXPERIMENT_METADATA_FILENAME)
+    if not os.path.isfile(meta_path):
+        raise FileNotFoundError(
+            f"No {EXPERIMENT_METADATA_FILENAME} in {run_dir!r}; cannot replot without metadata. "
+            "Re-run the experiment once to generate metadata, or call plot_results with explicit parameters."
+        )
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+    per_epoch_df = pd.read_csv(os.path.join(run_dir, "per_epoch_results.csv"))
+    summary_df = pd.read_csv(os.path.join(run_dir, "summary_results.csv"))
+    plot_kw = {k: meta[k] for k in ("C", "T", "s", "dataset_name")}
+    plot_results(per_epoch_df, summary_df, run_dir, **plot_kw)
+
+
 def run_experiment(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -306,22 +376,22 @@ def run_experiment(
     rounds: int,
     epochs_per_round: int,
     save_path: str,
-    split_point: float = 0.5, # for weighted TM→NN and unweighted TM→NN
+    split_point: float = 0.5, # for weighted TM-NN and unweighted TM-NN
     dataset_name: str = "MNIST",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run experiment with given parameters. This will compare the following methods:
     - UTM: unweighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
     - WTM: weighted TM for rounds*epochs_per_round epochs (save to pickle halfway)
-    - WTM→NN: frozen weighted TM trained for rounds*epochs_per_round / 2 epochs, then NN
+    - WTM-NN: frozen weighted TM trained for rounds*epochs_per_round / 2 epochs, then NN
         trained on top for rounds*epochs_per_round / 2 epochs
-    - UTM→NN: frozen unweighted TM trained for rounds*epochs_per_round / 2 epochs, then
+    - UTM-NN: frozen unweighted TM trained for rounds*epochs_per_round / 2 epochs, then
         NN trained on top for rounds*epochs_per_round / 2 epochs
     - Cyclic (TM⟷NN): start with weighted TM, alternate between TM and NN every
         epochs_per_round epochs. Each round: NN is initialized from the TM's current clause weights,
         trained for epochs_per_round epochs, then weights are copied back to the TM.
 
-    NOTE on naming: "TM→NN" makes the direction of information flow explicit. Avoid "TM + NN" since
+    NOTE on naming: "TM-NN" makes the direction of information flow explicit. Avoid "TM + NN" since
     it implies simultaneous use rather than sequential transfer.
 
     We will track:
@@ -358,22 +428,40 @@ def run_experiment(
     |-------------------|----------------------------------|----------------|
     | UTM     |                                  |                |
     | WTM       |                                  |                |
-    | UTM→NN  |                                  |                |
-    | WTM→NN    |                                  |                |
+    | UTM-NN  |                                  |                |
+    | WTM-NN    |                                  |                |
     | Cyclic (ours)|                                  |                |
     Pair the table with a bar chart (one bar per method, final TM accuracy) for scannability.
     The central claim: cyclic wins on accuracy; the per-epoch curve shows why (continuous
     bidirectional refinement vs. one-shot transfer).
+
+    After a successful training run, writes experiment_metadata.json next to the CSVs so
+    results.png can be regenerated via replot_from_run_dir without retraining. If CSVs
+    already exist (skip branch) and results.png is missing, replot_from_run_dir is called
+    automatically only when experiment_metadata.json is present.
     """
     n_classes = len(np.unique(y_train))
     total_epochs = rounds * epochs_per_round * 2
-    #  check if the run directory already exists and results exist in it
-    if os.path.exists(os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}", "per_epoch_results.csv")) and os.path.exists(os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}", "summary_results.csv")):
-        print(f"Run directory {os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}")} already exists and results exist in it. Skipping...")
-        # return the per_epoch_results.csv and summary_results.csv
-        return pd.read_csv(os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}", "per_epoch_results.csv")), pd.read_csv(os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}", "summary_results.csv"))
-
     run_dir = os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}")
+    per_epoch_csv = os.path.join(run_dir, "per_epoch_results.csv")
+    summary_csv = os.path.join(run_dir, "summary_results.csv")
+    results_png = os.path.join(run_dir, "results.png")
+    metadata_json = os.path.join(run_dir, EXPERIMENT_METADATA_FILENAME)
+
+    if os.path.isfile(per_epoch_csv) and os.path.isfile(summary_csv):
+        print(f"Run directory {run_dir} already exists and CSV results are present. Skipping training...")
+        per_epoch_df = pd.read_csv(per_epoch_csv)
+        summary_df = pd.read_csv(summary_csv)
+        if not os.path.isfile(results_png):
+            if os.path.isfile(metadata_json):
+                replot_from_run_dir(run_dir)
+            else:
+                print(
+                    f"results.png is missing under {run_dir!r} and {EXPERIMENT_METADATA_FILENAME} was not found; "
+                    "cannot auto-replot. Re-run the experiment once to emit metadata, or call plot_results manually."
+                )
+        return per_epoch_df, summary_df
+
     os.makedirs(run_dir, exist_ok=True)
     split_one = int(total_epochs * split_point)
     split_two = total_epochs - split_one
@@ -433,25 +521,25 @@ def run_experiment(
     r_w2 = train_tm(weighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
     _add("WTM", r_w1 + r_w2, "tm", 1)
 
-    # 3. WTM→NN: reuse r_w1 as the TM phase (same checkpoint), then train NN
-    print(f"[3/5] Training WTM→NN (NN phase, {split_two} epochs)")
+    # 3. WTM-NN: reuse r_w1 as the TM phase (same checkpoint), then train NN
+    print(f"[3/5] Training WTM-NN (NN phase, {split_two} epochs)")
     frozen_weighted_tm = pkl.load(open(weighted_tm_path, "rb"))
     nn_w = LogWeightHead(n_classes=n_classes, n_clauses=frozen_weighted_tm.number_of_clauses,
                          T=None, init_weights=frozen_weighted_tm.get_clause_weights())
-    ep = _add("WTM→NN", r_w1, "tm", 1)
+    ep = _add("WTM-NN", r_w1, "tm", 1)
     r_nn_w = train_log_weight_head(nn_w, frozen_weighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
-    ep = _add("WTM→NN", r_nn_w, "nn", ep)
+    ep = _add("WTM-NN", r_nn_w, "nn", ep)
     Z_test_w = frozen_weighted_tm.transform(x_test, inverted=False).astype("uint8")
     scaled_weights = scale_weights_for_tm(nn_w, Z_test_w, frozen_weighted_tm.T)
     frozen_weighted_tm.set_clause_weights(scaled_weights)
 
-    # 4. UTM→NN: reuse r_u1 as the TM phase, then train NN
-    print(f"[4/5] Training UTM→NN (NN phase, {split_two} epochs)")
+    # 4. UTM-NN: reuse r_u1 as the TM phase, then train NN
+    print(f"[4/5] Training UTM-NN (NN phase, {split_two} epochs)")
     frozen_unweighted_tm = pkl.load(open(unweighted_tm_path, "rb"))
     nn_u = LogWeightHead(n_classes=n_classes, n_clauses=frozen_unweighted_tm.number_of_clauses, T=None)
-    ep = _add("UTM→NN", r_u1, "tm", 1)
+    ep = _add("UTM-NN", r_u1, "tm", 1)
     r_nn_u = train_log_weight_head(nn_u, frozen_unweighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
-    ep = _add("UTM→NN", r_nn_u, "nn", ep)
+    ep = _add("UTM-NN", r_nn_u, "nn", ep)
     Z_test_u = frozen_unweighted_tm.transform(x_test, inverted=False).astype("uint8")
     scaled_weights = scale_weights_for_tm(nn_u, Z_test_u, frozen_unweighted_tm.T)
     frozen_unweighted_tm.set_clause_weights(scaled_weights)
@@ -466,8 +554,8 @@ def run_experiment(
     final_models = {
         "UTM":    unweighted_tm,
         "WTM":      weighted_tm,
-        "WTM→NN":   frozen_weighted_tm,
-        "UTM→NN": frozen_unweighted_tm,
+        "WTM-NN":   frozen_weighted_tm,
+        "UTM-NN": frozen_unweighted_tm,
         "Cyclic":      cyclic_tm,
     }
     # Randomize run order and repeat to get a reliable inference time estimate.
@@ -482,19 +570,15 @@ def run_experiment(
     inference_times = {m: sum(v) / len(v) for m, v in inference_times.items()}
 
     # Summary: avg of last 10 relevant epochs, inference time from timed predict calls.
-    # For TM→NN methods: average last 10 NN epochs (they report TM acc via scaled weights).
+    # For TM-NN methods: average last 10 NN epochs (they report TM acc via scaled weights).
     # For Cyclic: average last 10 NN epochs (same row set as _last10_accuracy_rows).
     # For pure TM methods: average last 10 TM epochs.
-    def _last10_avg_acc(method: str, mdf: pd.DataFrame) -> float:
-        return round(_last10_accuracy_rows(method, mdf)["test_accuracy"].mean(), 2)
-
-    methods_ordered = ["UTM", "WTM", "WTM→NN", "UTM→NN", "Cyclic"]
     summary_rows = []
-    for method in methods_ordered:
+    for method in METHODS_ORDERED:
         mdf = per_epoch_df[per_epoch_df["method"] == method]
         summary_rows.append({
             "method": method,
-            "avg_last10_tm_accuracy": _last10_avg_acc(method, mdf),
+            "avg_last10_tm_accuracy": _last10_avg_accuracy(method, mdf),
             "avg_tm_epoch_time_s": round(mdf[mdf["model_type"] == "tm"]["train_time"].mean(), 3),
             "inference_time_s": round(inference_times[method], 4),
             "total_train_time_s": round(mdf["train_time"].sum(), 2),
@@ -505,6 +589,18 @@ def run_experiment(
     summary_df.to_csv(os.path.join(run_dir, "summary_results.csv"), index=False)
     print("\n" + summary_df.to_string(index=False))
 
+    write_experiment_metadata(
+        run_dir,
+        C=C,
+        T=T,
+        s=s,
+        dataset_name=dataset_name,
+        number_of_state_bits=number_of_state_bits,
+        rounds=rounds,
+        epochs_per_round=epochs_per_round,
+        split_point=split_point,
+        total_epochs=total_epochs,
+    )
     plot_results(per_epoch_df, summary_df, run_dir, C=C, T=T, s=s, dataset_name=dataset_name)
 
     return per_epoch_df, summary_df
@@ -519,9 +615,8 @@ def plot_results(
     s: float = None,
     dataset_name: str = "MNIST",
 ) -> None:
-    methods = ["WTM→NN", "UTM→NN", "UTM", "WTM", "Cyclic"]
     prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    color_map = {m: prop_cycle[i % len(prop_cycle)] for i, m in enumerate(methods)}
+    color_map = {m: prop_cycle[i % len(prop_cycle)] for i, m in enumerate(METHODS_PLOT_ORDER)}
 
     fig, ((ax_curve, ax_time), (ax_bar, ax_train)) = plt.subplots(2, 2, figsize=(14, 10))
 
@@ -529,7 +624,7 @@ def plot_results(
 
     # --- per-epoch accuracy curve (top-left) ---
     max_epoch = per_epoch_df["epoch"].max()
-    for method in methods:
+    for method in METHODS_PLOT_ORDER:
         color = color_map[method]
         train_df = per_epoch_df[per_epoch_df["method"] == method].sort_values("epoch").reset_index(drop=True)
         if train_df.empty:
@@ -567,7 +662,7 @@ def plot_results(
                       fontsize=9, verticalalignment="top",
                       bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="gray", alpha=0.8))
 
-    method_handles = [Line2D([0], [0], color=color_map[m], linewidth=1.5, label=m) for m in methods]
+    method_handles = [Line2D([0], [0], color=color_map[m], linewidth=1.5, label=m) for m in METHODS_PLOT_ORDER]
     style_handles  = [Line2D([0], [0], color="black", linestyle="-",  label="TM training"),
                       Line2D([0], [0], color="black", linestyle="--", label="NN training")]
     ax_curve.legend(handles=method_handles + style_handles, fontsize=8, loc="lower right")
@@ -602,8 +697,7 @@ def plot_results(
          "Total Training Time (s)", "Total Training Time by Method", "{:.1f}s")
 
     plt.tight_layout()
-    fname = f"results.png"
-    out_path = os.path.join(save_path, fname)
+    out_path = os.path.join(save_path, "results.png")
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"Saved plot to {out_path}")
     plt.close()
@@ -712,6 +806,10 @@ if __name__ == "__main__":
             per_epoch_dfs=per_epoch_dfs,
             summary_dfs=summary_dfs,
             save_path="results",
+            total_epochs=rounds * epochs_per_round * 2,
+            T=T,
+            s=s,
+            split_point=split_point,
         )
 
 

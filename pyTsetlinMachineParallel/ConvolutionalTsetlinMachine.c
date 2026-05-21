@@ -72,7 +72,7 @@ struct TsetlinMachine *CreateTsetlinMachine(int number_of_clauses, int number_of
 
 	tm->feedback_to_clauses = (int *)malloc(sizeof(int) * tm->number_of_clause_chunks);
 	
-	tm->clause_weights = (unsigned int *)malloc(sizeof(unsigned int) * number_of_clauses);
+	tm->clause_weights = (float *)malloc(sizeof(float) * number_of_clauses);
 
 	if (((number_of_features) % 32) != 0) {
 		tm->filter  = (~(0xffffffff << ((number_of_features) % 32)));
@@ -103,7 +103,7 @@ void tm_initialize(struct TsetlinMachine *tm)
 			tm->ta_state[pos] = 0;
 			pos++;
 		}
-		tm->clause_weights[j] = 1;
+		tm->clause_weights[j] = 1.0f;
 	}
 }
 
@@ -189,24 +189,27 @@ static inline void tm_dec(struct TsetlinMachine *tm, int clause, int chunk, unsi
 If clamp is 1, then the class sum is clamped between -T and T
 This should always be true unless you are crazy (or using soft labels)
 */
-static inline int sum_up_class_votes(struct TsetlinMachine *tm, int clamp)
+static inline float sum_up_class_votes(struct TsetlinMachine *tm, int clamp)
 {
-	int class_sum = 0;
+	float class_sum = 0.0f;
+	float T = (float)tm->T;
 
 	for (int j = 0; j < tm->number_of_clauses; j++) {
 		int clause_chunk = j / 32;
 		int clause_pos = j % 32;
 
 		if (j % 2 == 0) {
-			class_sum += tm->clause_weights[j] * ((tm->clause_output[clause_chunk] & (1 << clause_pos)) > 0);
+			class_sum += tm->clause_weights[j] * (float)((tm->clause_output[clause_chunk] & (1 << clause_pos)) > 0);
 		} else {
-			class_sum -= tm->clause_weights[j] * ((tm->clause_output[clause_chunk] & (1 << clause_pos)) > 0);
+			class_sum -= tm->clause_weights[j] * (float)((tm->clause_output[clause_chunk] & (1 << clause_pos)) > 0);
 		}	
 	}
 
 	if (clamp == 1) {
-		class_sum = (class_sum > (tm->T)) ? (tm->T) : class_sum;
-		class_sum = (class_sum < -(tm->T)) ? -(tm->T) : class_sum;
+		if (class_sum > T)
+			class_sum = T;
+		if (class_sum < -T)
+			class_sum = -T;
 	}
 
 	return class_sum;
@@ -273,7 +276,7 @@ static inline void tm_calculate_clause_output(struct TsetlinMachine *tm, unsigne
 // The Tsetlin Machine can be trained incrementally, one training example at a time.
 // Use this method directly for online and incremental training.
 
-void tm_update_clauses(struct TsetlinMachine *tm, unsigned int *Xi, int class_sum, int target)
+void tm_update_clauses(struct TsetlinMachine *tm, unsigned int *Xi, float class_sum, int target)
 {
 	unsigned int *ta_state = tm->ta_state;
 
@@ -304,8 +307,8 @@ void tm_update_clauses(struct TsetlinMachine *tm, unsigned int *Xi, int class_su
 			if ((tm->clause_output[clause_chunk] & (1 << clause_chunk_pos)) > 0) {
 				// Type II Feedback
 				
-				if (tm->weighted_clauses && tm->clause_weights[j] > 1) {
-					tm->clause_weights[j]--;
+				if (tm->weighted_clauses && tm->clause_weights[j] > 1.0f) {
+					tm->clause_weights[j] -= 1.0f;
 				}
 
 				for (int k = 0; k < tm->number_of_ta_chunks; ++k) {
@@ -324,7 +327,7 @@ void tm_update_clauses(struct TsetlinMachine *tm, unsigned int *Xi, int class_su
 				// Type Ia Feedback
 
 				if (tm->weighted_clauses) {
-					tm->clause_weights[j]++;
+					tm->clause_weights[j] += 1.0f;
 				}
 				
 				for (int k = 0; k < tm->number_of_ta_chunks; ++k) {
@@ -362,7 +365,7 @@ void tm_update(struct TsetlinMachine *tm, unsigned int *Xi, int target)
 	/*** Sum up Clause Votes ***/
 	/***************************/
 
-	int class_sum = sum_up_class_votes(tm, 1);
+	float class_sum = sum_up_class_votes(tm, 1);
 
 	/*********************************/
 	/*** Train Individual Automata ***/
@@ -375,7 +378,7 @@ void tm_update(struct TsetlinMachine *tm, unsigned int *Xi, int target)
 If clamp is 1, then the class sum is clamped between -T and T
 This should always be true unless you are crazy (or using soft labels)
 */
-int tm_score(struct TsetlinMachine *tm, unsigned int *Xi, int clamp) {
+float tm_score(struct TsetlinMachine *tm, unsigned int *Xi, int clamp) {
 	/*******************************/
 	/*** Calculate Clause Output ***/
 	/*******************************/
@@ -446,14 +449,14 @@ void tm_set_ta_state(struct TsetlinMachine *tm, unsigned int *ta_state)
 	}
 }
 
-void tm_get_clause_weights(struct TsetlinMachine *tm, unsigned int *clause_weights)
+void tm_get_clause_weights(struct TsetlinMachine *tm, float *clause_weights)
 {
 	for (int j = 0; j < tm->number_of_clauses; ++j) {
 		clause_weights[j] = tm->clause_weights[j];
 	}
 }
 
-void tm_set_clause_weights(struct TsetlinMachine *tm, unsigned int *clause_weights)
+void tm_set_clause_weights(struct TsetlinMachine *tm, float *clause_weights)
 {
 	for (int j = 0; j < tm->number_of_clauses; ++j) {
 		tm->clause_weights[j] = clause_weights[j];
@@ -465,18 +468,20 @@ void tm_set_clause_weights(struct TsetlinMachine *tm, unsigned int *clause_weigh
 /**************************************/
 
 /* Sum up the votes for each class */
-static inline int sum_up_class_votes_regression(struct TsetlinMachine *tm)
+static inline float sum_up_class_votes_regression(struct TsetlinMachine *tm)
 {
-	int class_sum = 0;
+	float class_sum = 0.0f;
+	float T = (float)tm->T;
 
 	for (int j = 0; j < tm->number_of_clauses; j++) {
 		int clause_chunk = j / 32;
 		int clause_pos = j % 32;
 
-		class_sum += tm->clause_weights[j] * ((tm->clause_output[clause_chunk] & (1 << clause_pos)) > 0);
+		class_sum += tm->clause_weights[j] * (float)((tm->clause_output[clause_chunk] & (1 << clause_pos)) > 0);
 		
 	}
-	class_sum = (class_sum > (tm->T)) ? (tm->T) : class_sum;
+	if (class_sum > T)
+		class_sum = T;
 
 	return class_sum;
 }
@@ -498,7 +503,7 @@ void tm_update_regression(struct TsetlinMachine *tm, unsigned int *Xi, int targe
 	/*** Sum up Clause Votes ***/
 	/***************************/
 
-	int class_sum = sum_up_class_votes_regression(tm);
+	float class_sum = sum_up_class_votes_regression(tm);
 
 	/*********************************/
 	/*** Train Individual Automata ***/
@@ -506,7 +511,7 @@ void tm_update_regression(struct TsetlinMachine *tm, unsigned int *Xi, int targe
 	
 	// Calculate feedback to clauses
 
-	int prediction_error = class_sum - target; 
+	float prediction_error = class_sum - (float)target; 
 
 	for (int j = 0; j < tm->number_of_clause_chunks; j++) {
 	 	tm->feedback_to_clauses[j] = 0;
@@ -516,7 +521,7 @@ void tm_update_regression(struct TsetlinMachine *tm, unsigned int *Xi, int targe
 		unsigned int clause_chunk = j / 32;
 		unsigned int clause_chunk_pos = j % 32;
 
-	 	tm->feedback_to_clauses[clause_chunk] |= (((float)fast_rand())/((float)FAST_RAND_MAX) <= pow(1.0*prediction_error/tm->T, 2)) << clause_chunk_pos;
+	 	tm->feedback_to_clauses[clause_chunk] |= (((float)fast_rand())/((float)FAST_RAND_MAX) <= powf(prediction_error/(float)tm->T, 2.0f)) << clause_chunk_pos;
 	}
 
 	for (int j = 0; j < tm->number_of_clauses; j++) {
@@ -531,8 +536,8 @@ void tm_update_regression(struct TsetlinMachine *tm, unsigned int *Xi, int targe
 			if ((tm->clause_output[clause_chunk] & (1 << clause_chunk_pos)) > 0) {
 				// Type II Feedback
 				
-				if (tm->weighted_clauses && tm->clause_weights[j] > 1) {
-					tm->clause_weights[j]--;
+				if (tm->weighted_clauses && tm->clause_weights[j] > 1.0f) {
+					tm->clause_weights[j] -= 1.0f;
 				}
 
 				for (int k = 0; k < tm->number_of_ta_chunks; ++k) {
@@ -551,7 +556,7 @@ void tm_update_regression(struct TsetlinMachine *tm, unsigned int *Xi, int targe
 				// Type Ia Feedback
 				
 				if (tm->weighted_clauses) {
-					tm->clause_weights[j]++;
+					tm->clause_weights[j] += 1.0f;
 				}
 				
 				for (int k = 0; k < tm->number_of_ta_chunks; ++k) {
@@ -624,7 +629,7 @@ void tm_fit_regression(struct TsetlinMachine *tm, unsigned int *X, int *y, int n
 	free(tm_thread);
 }
 
-int tm_score_regression(struct TsetlinMachine *tm, unsigned int *Xi) {
+float tm_score_regression(struct TsetlinMachine *tm, unsigned int *Xi) {
 	/*******************************/
 	/*** Calculate Clause Output ***/
 	/*******************************/
@@ -662,7 +667,13 @@ void tm_predict_regression(struct TsetlinMachine *tm, unsigned int *X, int *y, i
 		int thread_id = omp_get_thread_num();
 		unsigned int pos = l*step_size;
 
-		y[l] = tm_score_regression(tm_thread[thread_id], &X[pos]);		
+		float s = tm_score_regression(tm_thread[thread_id], &X[pos]);
+		long r = lroundf(s);
+		if (r < 0)
+			r = 0;
+		if (r > tm->T)
+			r = tm->T;
+		y[l] = (int)r;
 	}
 
 	for (int t = 0; t < max_threads; t++) {

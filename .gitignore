@@ -6,3 +6,7 @@ build
 *.so
 .specstory
 data
+CLAUDE.md
+settings.local.json
+.venv/
+results

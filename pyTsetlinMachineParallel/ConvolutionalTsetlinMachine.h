@@ -47,7 +47,7 @@ struct TsetlinMachine {
 
 	int *output_one_patches;
 
-	unsigned int *clause_weights;
+	float *clause_weights;
 
 	int number_of_patches;
 	int number_of_ta_chunks;
@@ -72,11 +72,11 @@ void tm_initialize(struct TsetlinMachine *tm);
 
 void tm_destroy(struct TsetlinMachine *tm);
 
-void tm_update_clauses(struct TsetlinMachine *tm, unsigned int *Xi, int class_sum, int target);
+void tm_update_clauses(struct TsetlinMachine *tm, unsigned int *Xi, float class_sum, int target);
 
 void tm_update(struct TsetlinMachine *tm, unsigned int *Xi, int target);
 
-int tm_score(struct TsetlinMachine *tm, unsigned int *Xi, int clamp);
+float tm_score(struct TsetlinMachine *tm, unsigned int *Xi, int clamp);
 
 int tm_ta_state(struct TsetlinMachine *tm, int clause, int ta);
 
@@ -86,7 +86,7 @@ void tm_update_regression(struct TsetlinMachine *tm, unsigned int *Xi, int targe
 
 void tm_fit_regression(struct TsetlinMachine *tm, unsigned int *X, int *y, int number_of_examples, int epochs);
 
-int tm_score_regression(struct TsetlinMachine *tm, unsigned int *Xi);
+float tm_score_regression(struct TsetlinMachine *tm, unsigned int *Xi);
 
 void tm_predict_regression(struct TsetlinMachine *tm, unsigned int *X, int *y, int number_of_examples);
 
@@ -94,8 +94,8 @@ void tm_get_ta_state(struct TsetlinMachine *tm, unsigned int *ta_state);
 
 void tm_set_ta_state(struct TsetlinMachine *tm, unsigned int *ta_state);
 
-void tm_get_clause_weights(struct TsetlinMachine *tm, unsigned int *clause_weights);
+void tm_get_clause_weights(struct TsetlinMachine *tm, float *clause_weights);
 
-void tm_set_clause_weights(struct TsetlinMachine *tm, unsigned int *clause_weights);
+void tm_set_clause_weights(struct TsetlinMachine *tm, float *clause_weights);
 
 

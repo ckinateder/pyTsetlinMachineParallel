@@ -1,0 +1,6 @@
+dataset,total_epochs,T,s,split_point,method,n_seeds,n_pooled_accuracy_epochs,avg_last10_tm_accuracy_mean,avg_last10_tm_accuracy_std,avg_tm_epoch_time_s_mean,avg_tm_epoch_time_s_std,inference_time_s_mean,inference_time_s_std,total_train_time_s_mean,total_train_time_s_std
+KMNIST,500,25,4.0,0.3,UTM,5,50,68.1002,0.4999,0.5583,0.0002,0.0721,0.0008,279.17,0.12
+KMNIST,500,25,4.0,0.3,WTM,5,50,73.8036,1.2265,0.3174,0.0021,0.0656,0.0007,158.68,1.07
+KMNIST,500,25,4.0,0.3,WTM-NN,5,50,80.7092,0.2824,0.3272,0.002,0.0655,0.0005,125.12,0.42
+KMNIST,500,25,4.0,0.3,UTM-NN,5,50,71.9068,0.2236,0.558,0.001,0.0715,0.0002,159.86,0.99
+KMNIST,500,25,4.0,0.3,Cyclic,5,50,80.4744,0.3424,0.3218,0.0009,0.0653,0.0012,121.66,8.66

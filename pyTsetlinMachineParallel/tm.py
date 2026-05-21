@@ -54,6 +54,16 @@ array_2d_int = np.ctypeslib.ndpointer(
 	ndim=2,
 	flags='CONTIGUOUS')
 
+array_1d_float = np.ctypeslib.ndpointer(
+	dtype=np.float32,
+	ndim=1,
+	flags='CONTIGUOUS')
+
+array_2d_float = np.ctypeslib.ndpointer(
+	dtype=np.float32,
+	ndim=2,
+	flags='CONTIGUOUS')
+
 
 # Multiclass Tsetlin Machine
 
@@ -73,7 +83,7 @@ _lib.mc_tm_predict.restype = None
 _lib.mc_tm_predict.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, C.c_int] 
 
 _lib.mc_tm_predict_with_class_sums_2d.restype = None                    
-_lib.mc_tm_predict_with_class_sums_2d.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, array_2d_int, C.c_int] 
+_lib.mc_tm_predict_with_class_sums_2d.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, array_2d_float, C.c_int] 
 
 _lib.mc_tm_ta_state.restype = C.c_int                    
 _lib.mc_tm_ta_state.argtypes = [mc_ctm_pointer, C.c_int, C.c_int, C.c_int]
@@ -82,10 +92,13 @@ _lib.mc_tm_ta_action.restype = C.c_int
 _lib.mc_tm_ta_action.argtypes = [mc_ctm_pointer, C.c_int, C.c_int, C.c_int] 
 
 _lib.mc_tm_set_state.restype = None
-_lib.mc_tm_set_state.argtypes = [mc_ctm_pointer, C.c_int, array_1d_uint, array_1d_uint]
+_lib.mc_tm_set_state.argtypes = [mc_ctm_pointer, C.c_int, array_1d_float, array_1d_uint]
 
 _lib.mc_tm_get_state.restype = None
-_lib.mc_tm_get_state.argtypes = [mc_ctm_pointer, C.c_int, array_1d_uint, array_1d_uint]
+_lib.mc_tm_get_state.argtypes = [mc_ctm_pointer, C.c_int, array_1d_float, array_1d_uint]
+
+_lib.mc_tm_clause_weight.restype = C.c_float
+_lib.mc_tm_clause_weight.argtypes = [mc_ctm_pointer, C.c_int, C.c_int]
 
 _lib.mc_tm_transform.restype = None
 _lib.mc_tm_transform.argtypes = [mc_ctm_pointer, array_1d_uint, array_1d_uint, C.c_int, C.c_int] 
@@ -213,7 +226,7 @@ class MultiClassConvolutionalTsetlinMachine2D():
 		state_list = []
 		for i in range(self.number_of_classes):
 			ta_states = np.ascontiguousarray(np.empty(self.number_of_clauses * self.number_of_ta_chunks * self.number_of_state_bits, dtype=np.uint32))
-			clause_weights = np.ascontiguousarray(np.empty(self.number_of_clauses, dtype=np.uint32))
+			clause_weights = np.ascontiguousarray(np.empty(self.number_of_clauses, dtype=np.float32))
 			_lib.mc_tm_get_state(self.mc_ctm, i, clause_weights, ta_states)
 			state_list.append((clause_weights, ta_states))
 
@@ -221,7 +234,8 @@ class MultiClassConvolutionalTsetlinMachine2D():
 
 	def set_state(self, state_list):
 		for i in range(self.number_of_classes):
-			_lib.mc_tm_set_state(self.mc_ctm, i, state_list[i][0], state_list[i][1])
+			cw = np.ascontiguousarray(np.asarray(state_list[i][0], dtype=np.float32))
+			_lib.mc_tm_set_state(self.mc_ctm, i, cw, state_list[i][1])
 
 		return
 
@@ -282,6 +296,41 @@ class MultiClassTsetlinMachine():
 		if self.itm != None:
 			_lib.itm_destroy(self.itm)
 
+	def get_clause_weights(self, class_idx=None):
+		"""
+		Get clause weights.
+
+		Parameters:
+		- class_idx: Optional class index. If None, returns a list of weights for all classes.
+
+		Returns:
+		- np.ndarray for one class, or list[np.ndarray] for all classes.
+		"""
+		state = self.get_state()
+		if class_idx is None:
+			return np.array([class_state[0].copy() for class_state in state])
+		return state[class_idx][0].copy()
+
+	def set_clause_weights(self, weights):
+		"""
+		Set clause weights while preserving TA states.
+
+		Parameters:
+		- weights: New clause weights.
+			* If class_idx is not None, expected shape is (number_of_clauses,).
+			* If class_idx is None, expected shape is (number_of_classes, number_of_clauses)
+			  or a list with one weight vector per class.
+		- class_idx: Optional class index. If None, sets weights for all classes.
+		"""
+		state = self.get_state()
+
+		assert len(weights) == self.number_of_classes, "Expected one weight vector per class."
+		for i in range(self.number_of_classes):
+			cw = np.ascontiguousarray(np.asarray(weights[i], dtype=np.float32))
+			assert cw.shape[0] == self.number_of_clauses, "Each class weight vector must match number_of_clauses."
+			state[i] = (cw, state[i][1])
+
+		self.set_state(state)
 	def fit(self, X, Y, epochs=100, incremental=False):
 		number_of_examples = X.shape[0]
 
@@ -333,13 +382,11 @@ class MultiClassTsetlinMachine():
 	
 	def predict_class_sums_2d(self, X):
 		"""
-		Use to get the 2d class sums for each example in X
+		Use to get the 2d class sums for each example in X (``dtype=float32``, unclamped).
 		Ex:
 		>>> Y, class_sums = tm.predict_class_sums_2d(X)
-		>>> print(class_sums)
-		[[ 0  0  0  0  0  0  0  0  0  0]
-		 [ 0  0  0  0  0  0  0  0  0  0]
-		 [ 0  0  0  0  0  0  0  0  0  0]
+		>>> print(class_sums)  # doctest: +SKIP
+		[[ 0.  0.  ...]
 		 ....
 		]
 		"""
@@ -355,7 +402,7 @@ class MultiClassTsetlinMachine():
 			_lib.tm_encode(Xm, self.encoded_X, number_of_examples, self.number_of_features, 1, 1, self.number_of_features, 1, 0)
 	
 		Y = np.ascontiguousarray(np.zeros(number_of_examples, dtype=np.uint32))
-		class_sums = np.ascontiguousarray(np.zeros((number_of_examples, self.number_of_classes), dtype=np.int32))
+		class_sums = np.ascontiguousarray(np.zeros((number_of_examples, self.number_of_classes), dtype=np.float32))
 		_lib.mc_tm_predict_with_class_sums_2d(self.mc_tm, self.encoded_X, Y, class_sums, number_of_examples)
 		return Y, class_sums
 	
@@ -388,7 +435,7 @@ class MultiClassTsetlinMachine():
 		state_list = []
 		for i in range(self.number_of_classes):
 			ta_states = np.ascontiguousarray(np.empty(self.number_of_clauses * self.number_of_ta_chunks * self.number_of_state_bits, dtype=np.uint32))
-			clause_weights = np.ascontiguousarray(np.empty(self.number_of_clauses, dtype=np.uint32))
+			clause_weights = np.ascontiguousarray(np.empty(self.number_of_clauses, dtype=np.float32))
 			_lib.mc_tm_get_state(self.mc_tm, i, clause_weights, ta_states)
 			state_list.append((clause_weights, ta_states))
 
@@ -396,7 +443,8 @@ class MultiClassTsetlinMachine():
 
 	def set_state(self, state_list):
 		for i in range(self.number_of_classes):
-			_lib.mc_tm_set_state(self.mc_tm, i, state_list[i][0], state_list[i][1])
+			cw = np.ascontiguousarray(np.asarray(state_list[i][0], dtype=np.float32))
+			_lib.mc_tm_set_state(self.mc_tm, i, cw, state_list[i][1])
 
 		return
 
@@ -733,6 +781,7 @@ class MultiClassTsetlinMachine():
 						return False  # Literal doesn't match input
 					
 		return True  # All included literals match
+
 
 class RegressionTsetlinMachine():
 	def __init__(self, number_of_clauses, T, s, boost_true_positive_feedback=1, number_of_state_bits=8, weighted_clauses=False, s_range=False):

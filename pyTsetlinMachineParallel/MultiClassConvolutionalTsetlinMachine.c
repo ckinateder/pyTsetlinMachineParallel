@@ -30,6 +30,7 @@ https://arxiv.org/abs/1905.09688
 #include <omp.h>
 #include "fast_rand.h"
 #include "MultiClassConvolutionalTsetlinMachine.h"
+#include <math.h>
 
 /**************************************/
 /*** The Convolutional Tsetlin Machine ***/
@@ -103,10 +104,10 @@ void mc_tm_predict(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int 
 
 		unsigned int pos = l*step_size;
 		// Identify class with largest output
-		int max_class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[0], &X[pos], 1);
+		float max_class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[0], &X[pos], 1);
 		int max_class = 0;
 		for (int i = 0; i < mc_tm_thread[thread_id]->number_of_classes; i++) {	
-			int class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 1);
+			float class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 1);
 			if (max_class_sum < class_sum) {
 				max_class_sum = class_sum;
 				max_class = i;
@@ -117,7 +118,7 @@ void mc_tm_predict(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int 
 	}
 
 	for (int t = 0; t < max_threads; t++) {
-		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {	
+		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {
 
 			struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
 
@@ -125,12 +126,15 @@ void mc_tm_predict(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int 
 			free(tm_thread->output_one_patches);
 			free(tm_thread->feedback_to_la);
 			free(tm_thread->feedback_to_clauses);
+			free(tm_thread->clause_patch);
 			free(tm_thread);
 		}
+		free(mc_tm_thread[t]->tsetlin_machines);
+		free(mc_tm_thread[t]);
 	}
 
 	free(mc_tm_thread);
-	
+
 	return;
 }
 
@@ -140,7 +144,7 @@ void mc_tm_predict(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int 
 /*** THERE IS NO CLAMPING HERE ***/
 /***********************************/
 
-void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, int *class_sums, int number_of_examples)
+void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *class_sums, int number_of_examples)
 {
 
 	unsigned int step_size = mc_tm->number_of_patches * mc_tm->number_of_ta_chunks;
@@ -163,10 +167,10 @@ void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, un
 
 		unsigned int pos = l*step_size;
 		// Identify class with largest output
-		int max_class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[0], &X[pos], 0);
+		float max_class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[0], &X[pos], 0);
 		int max_class = 0;
 		for (int i = 0; i < mc_tm_thread[thread_id]->number_of_classes; i++) {	
-			int class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 0);
+			float class_sum = tm_score(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 0);
 			if (max_class_sum < class_sum) {
 				max_class_sum = class_sum;
 				max_class = i;
@@ -179,7 +183,7 @@ void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, un
 	}
 
 	for (int t = 0; t < max_threads; t++) {
-		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {	
+		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {
 
 			struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
 
@@ -187,12 +191,15 @@ void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, un
 			free(tm_thread->output_one_patches);
 			free(tm_thread->feedback_to_la);
 			free(tm_thread->feedback_to_clauses);
+			free(tm_thread->clause_patch);
 			free(tm_thread);
 		}
+		free(mc_tm_thread[t]->tsetlin_machines);
+		free(mc_tm_thread[t]);
 	}
 
 	free(mc_tm_thread);
-	
+
 	return;
 }
 
@@ -264,7 +271,7 @@ void mc_tm_fit(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, 
 	}
 
 	for (int t = 0; t < max_threads; t++) {
-		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {	
+		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {
 
 			struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
 
@@ -272,11 +279,16 @@ void mc_tm_fit(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, 
 			free(tm_thread->output_one_patches);
 			free(tm_thread->feedback_to_la);
 			free(tm_thread->feedback_to_clauses);
+			free(tm_thread->clause_patch);
 			free(tm_thread);
 		}
+		free(mc_tm_thread[t]->tsetlin_machines);
+		free(mc_tm_thread[t]);
 	}
 
-	free(tm->clause_lock);
+	for (int i = 0; i < mc_tm->number_of_classes; i++) {
+		free(mc_tm->tsetlin_machines[i]->clause_lock);
+	}
 	free(mc_tm_thread);
 }
 
@@ -299,16 +311,16 @@ void mc_tm_clause_configuration(struct MultiClassTsetlinMachine *mc_tm, int clas
 	return;
 }
 
-int mc_tm_clause_weight(struct MultiClassTsetlinMachine *mc_tm, int class, int clause)
+float mc_tm_clause_weight(struct MultiClassTsetlinMachine *mc_tm, int class, int clause)
 {
-	return(mc_tm->tsetlin_machines[class]->clause_weights[clause]);
+	return mc_tm->tsetlin_machines[class]->clause_weights[clause];
 }
 
 /*****************************************************/
 /*** Storing and Loading of Tsetlin Machine State ****/
 /*****************************************************/
 
-void mc_tm_get_state(struct MultiClassTsetlinMachine *mc_tm, int class, unsigned int *clause_weights, unsigned int *ta_state)
+void mc_tm_get_state(struct MultiClassTsetlinMachine *mc_tm, int class, float *clause_weights, unsigned int *ta_state)
 {
 	tm_get_ta_state(mc_tm->tsetlin_machines[class], ta_state);
 	tm_get_clause_weights(mc_tm->tsetlin_machines[class], clause_weights);
@@ -316,7 +328,7 @@ void mc_tm_get_state(struct MultiClassTsetlinMachine *mc_tm, int class, unsigned
 	return;
 }
 
-void mc_tm_set_state(struct MultiClassTsetlinMachine *mc_tm, int class, unsigned int *clause_weights, unsigned int *ta_state)
+void mc_tm_set_state(struct MultiClassTsetlinMachine *mc_tm, int class, float *clause_weights, unsigned int *ta_state)
 {
 	tm_set_ta_state(mc_tm->tsetlin_machines[class], ta_state);
 	tm_set_clause_weights(mc_tm->tsetlin_machines[class], clause_weights);
@@ -370,8 +382,8 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
 
 			for (int j = 0; j < mc_tm->tsetlin_machines[i]->number_of_clauses; ++j) {
 				// Calculate position in transformed feature space
-				unsigned long transformed_feature = l*mc_tm->number_of_classes*mc_tm->tsetlin_machines[i]->number_of_clauses + 
-													i*mc_tm->tsetlin_machines[i]->number_of_clauses + j;
+				unsigned long transformed_feature = (unsigned long)l*mc_tm->number_of_classes*mc_tm->tsetlin_machines[i]->number_of_clauses +
+													(unsigned long)i*mc_tm->tsetlin_machines[i]->number_of_clauses + j;
 					
 				// Get the clause output from the bit packed format
 				int clause_chunk = j / 32;
@@ -390,212 +402,33 @@ void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  u
 		}
 	}
 
-	// TODO: Free the memory allocated for the threads
-	
+	for (int t = 0; t < max_threads; t++) {
+		for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {
+			struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
+			free(tm_thread->clause_output);
+			free(tm_thread->output_one_patches);
+			free(tm_thread->feedback_to_la);
+			free(tm_thread->feedback_to_clauses);
+			free(tm_thread->clause_patch);
+			free(tm_thread);
+		}
+		free(mc_tm_thread[t]->tsetlin_machines);
+		free(mc_tm_thread[t]);
+	}
+	free(mc_tm_thread);
+
 	return;
 }
-// Add new function for soft label training
-void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs)
-{
-    /*------------------------------------------------------------*/
-    /* Initialization and Setup                                   */
-    /*------------------------------------------------------------*/
-    // Calculate input data stride between consecutive examples
-    unsigned int step_size = mc_tm->number_of_patches * mc_tm->number_of_ta_chunks;
-
-    // Get maximum available threads for parallel processing
-    int max_threads = omp_get_max_threads();
-    
-    // Allocate thread-local TM instances
-    struct MultiClassTsetlinMachine **mc_tm_thread = 
-        (void *)malloc(sizeof(struct MultiClassTsetlinMachine *) * max_threads);
-    struct TsetlinMachine *tm = mc_tm->tsetlin_machines[0];
-    
-    /*------------------------------------------------------------*/
-    /* Clause Lock Initialization                                 */
-    /*------------------------------------------------------------*/
-    // Initialize OpenMP locks for thread-safe clause updates
-    for (int i = 0; i < mc_tm->number_of_classes; i++) {
-        // Allocate array of locks (one per clause)
-        mc_tm->tsetlin_machines[i]->clause_lock = 
-            (omp_lock_t *)malloc(sizeof(omp_lock_t) * tm->number_of_clauses);
-        
-        // Initialize each lock
-        for (int j = 0; j < tm->number_of_clauses; ++j) {
-            omp_init_lock(&mc_tm->tsetlin_machines[i]->clause_lock[j]);
-        }
-    }
-
-    /*------------------------------------------------------------*/
-    /* Thread-Local TM Setup                                      */
-    /*------------------------------------------------------------*/
-    // Create thread-specific TM instances with shared state
-    for (int t = 0; t < max_threads; t++) {
-        // Create skeleton TM structure
-        mc_tm_thread[t] = CreateMultiClassTsetlinMachine(
-            mc_tm->number_of_classes, 
-            tm->number_of_clauses,
-            tm->number_of_features,
-            tm->number_of_patches,
-            tm->number_of_ta_chunks,
-            tm->number_of_state_bits,
-            tm->T,
-            tm->s,
-            tm->s_range,
-            tm->boost_true_positive_feedback,
-            tm->weighted_clauses
-        );
-        
-        // Share actual state between threads
-        for (int i = 0; i < mc_tm->number_of_classes; i++) {
-            // Share TA states
-            free(mc_tm_thread[t]->tsetlin_machines[i]->ta_state);
-            mc_tm_thread[t]->tsetlin_machines[i]->ta_state = 
-                mc_tm->tsetlin_machines[i]->ta_state;
-            
-            // Share clause weights
-            free(mc_tm_thread[t]->tsetlin_machines[i]->clause_weights);
-            mc_tm_thread[t]->tsetlin_machines[i]->clause_weights = 
-                mc_tm->tsetlin_machines[i]->clause_weights;
-            
-            // Share clause locks
-            mc_tm_thread[t]->tsetlin_machines[i]->clause_lock = 
-                mc_tm->tsetlin_machines[i]->clause_lock;
-        }    
-    }
-
-    /*------------------------------------------------------------*/
-    /* Main Training Loop                                          */
-    /*------------------------------------------------------------*/
-    for (int epoch = 0; epoch < epochs; epoch++) {
-        // Process examples in parallel using OpenMP
-        #pragma omp parallel for
-        for (int l = 0; l < number_of_examples; l++) {
-            // Get thread ID and example position
-            int thread_id = omp_get_thread_num();
-            unsigned int pos = l * step_size;
-            
-            // Get true class label for this example
-            int target_class = y[l];
-            
-            // Pointer to soft label probabilities (num_classes elements)
-            float *example_soft_labels = &soft_labels[l * mc_tm->number_of_classes];
-            
-            /*----------------------------------------------------*/
-            /* Positive Class Update                             */
-            /*----------------------------------------------------*/
-            // Always reinforce the true class with Type I feedback
-            tm_update(mc_tm_thread[thread_id]->tsetlin_machines[target_class], 
-                     &X[pos], 1);
-
-            /*----------------------------------------------------*/
-            /* Negative Class Selection - Improved                */
-            /*----------------------------------------------------*/
-            // Hybrid approach: balance between soft probabilities and randomness
-            float randomization_factor = 0.3f; // 30% random selection, 70% soft probabilities
-            float random_val = (float)fast_rand() / FAST_RAND_MAX;
-            
-            int negative_class = -1; // Initialize with invalid value
-            
-            if (random_val < randomization_factor) {
-                // Use uniform random selection (like original algorithm)
-                do {
-                    negative_class = fast_rand() % mc_tm->number_of_classes;
-                } while (negative_class == target_class);
-            } else {
-                // Calculate total probability mass for negative classes
-                float total = 0.0f;
-                for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                    if (i != target_class) {
-                        total += example_soft_labels[i];
-                    }
-                }
-                
-                if (total <= 0.0001f) { // Effectively zero
-                    // Fallback to random when probabilities are too small
-                    do {
-                        negative_class = fast_rand() % mc_tm->number_of_classes;
-                    } while (negative_class == target_class);
-                } else {
-                    // Proportional sampling using inverse transform method
-                    float threshold = (float)fast_rand() / FAST_RAND_MAX * total;
-                    float cumulative = 0.0f;
-                    
-                    // Find first class where cumulative probability >= threshold
-                    for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                        if (i == target_class) continue;
-                        
-                        cumulative += example_soft_labels[i];
-                        if (cumulative >= threshold) {
-                            negative_class = i;
-                            break;
-                        }
-                    }
-                    
-                    // Safety check - if we somehow didn't select a class
-                    if (negative_class == -1) {
-                        do {
-                            negative_class = fast_rand() % mc_tm->number_of_classes;
-                        } while (negative_class == target_class);
-                    }
-                }
-            }
-
-            /*----------------------------------------------------*/
-            /* Negative Class Update                             */
-            /*----------------------------------------------------*/
-            // Apply Type II feedback to selected negative class
-            tm_update(mc_tm_thread[thread_id]->tsetlin_machines[negative_class], 
-                     &X[pos], 0);
-        }
-    }
-
-    /*------------------------------------------------------------*/
-    /* Cleanup and Resource Release                               */
-    /*------------------------------------------------------------*/
-    // Destroy clause locks
-    for (int i = 0; i < mc_tm->number_of_classes; i++) {
-        for (int j = 0; j < tm->number_of_clauses; ++j) {
-            omp_destroy_lock(&mc_tm->tsetlin_machines[i]->clause_lock[j]);
-        }
-    }
-
-    // Free thread-local TM instances
-    for (int t = 0; t < max_threads; t++) {
-        for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {    
-            struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
-            // Free temporary buffers while preserving shared state
-            free(tm_thread->clause_output);
-            free(tm_thread->output_one_patches);
-            free(tm_thread->feedback_to_la);
-            free(tm_thread->feedback_to_clauses);
-            free(tm_thread);
-        }
-    }
-
-    // Final memory cleanup
-    free(tm->clause_lock);
-    free(mc_tm_thread);
-}
-
-// Add new function for soft label training
 /*
- * This function implements knowledge distillation for Tsetlin Machines using soft labels.
- * 
- * Parameters:
- * - mc_tm: Pointer to the multi-class Tsetlin Machine to be trained
- * - X: Input data
- * - y: True class labels
- * - soft_labels: Probability distribution from teacher model (already temperature-scaled)
- * - number_of_examples: Number of training examples
- * - epochs: Number of training epochs
- * - alpha: Balance between hard and soft labels (0.0 = all soft, 1.0 = all hard)
- * - temperature: Controls additional temperature scaling for training dynamics
- *   - Higher values make the system more sensitive to teacher confidences
- *   - A temperature around 2-4 works well for most cases
- *   - This parameter is used to sharpen/soften the teacher's probability distribution
+ * Knowledge distillation training using pre-scaled soft labels from a teacher model.
+ *
+ * soft_labels: already temperature-scaled probabilities from get_soft_labels() in Python.
+ * alpha:       probability of using hard label feedback for the true class (0=all soft, 1=all hard).
+ * temperature: scales the feedback probability multiplier (1 + (1-sp)*T) — higher values
+ *              give more aggressive negative feedback to low-probability classes.
+ *              Label shaping is handled in Python via get_soft_labels(), not here.
  */
-void mc_tm_fit_soft_improved(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs, float alpha, float temperature)
+void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs, float alpha, float temperature)
 {
     /*------------------------------------------------------------*/
     /* Initialization and Setup                                   */
@@ -678,22 +511,6 @@ void mc_tm_fit_soft_improved(struct MultiClassTsetlinMachine *mc_tm, unsigned in
             // Get true class label for this example
             int target_class = y[l];
             
-            // Apply temperature scaling to soft labels (we already have softmax probabilities)
-            // Use a squared temperature for the same effect as double scaling
-            float adjusted_temperature = temperature * temperature;
-            float scaled_probs[mc_tm->number_of_classes];
-            float sum = 0.0;
-            
-            // Single temperature scaling with adjusted temperature gives same effect
-            for (int i = 0; i < mc_tm->number_of_classes; i++) {
-                scaled_probs[i] = powf(soft_labels[l * mc_tm->number_of_classes + i], 1.0/adjusted_temperature);
-                sum += scaled_probs[i];
-            }
-            
-            // Single normalization
-            for (int i = 0; i < mc_tm->number_of_classes; i++) 
-                scaled_probs[i] /= sum;
-            
             /*----------------------------------------------------*/
             /* Hard Label (True Class) Training                   */
             /*----------------------------------------------------*/
@@ -717,31 +534,14 @@ void mc_tm_fit_soft_improved(struct MultiClassTsetlinMachine *mc_tm, unsigned in
                 if (i == target_class && alpha > 0.0) continue;
                 
                 // Calculate base feedback probability based on soft label
-                float feedback_prob = (1.0 - alpha) * scaled_probs[i];
-                
-                // No training if probability is too small
-                if (feedback_prob < 0.001) continue;
-                
-                // Determine if we should give positive or negative feedback
-                // For high probabilities from teacher, train with positive feedback (1)
-                // For low probabilities, train with negative feedback (0)
-                int feedback_type = 0;
-                if (scaled_probs[i] > 0.5) {
-                    feedback_type = 1;
-                    // Strengthen positive feedback based on teacher confidence
-                    // Higher temperature makes this more aggressive
-                    feedback_prob = feedback_prob * (1.0 + scaled_probs[i] * temperature);
-                } else {
-                    feedback_type = 0;
-                    // Strengthen negative feedback based on teacher confidence
-                    // Higher temperature makes this more aggressive
-                    feedback_prob = feedback_prob * (1.0 + (1.0 - scaled_probs[i]) * temperature);
-                }
+                float sp = soft_labels[l * mc_tm->number_of_classes + i];
+                float feedback_prob = (1.0 - alpha) * sp;
+
+                feedback_prob *= (1.0f + (1.0f - sp) * temperature);
                 
                 // Apply feedback with probability proportional to soft label strength
                 if ((float)fast_rand() / FAST_RAND_MAX <= feedback_prob) {
-                    tm_update(mc_tm_thread[thread_id]->tsetlin_machines[i], 
-                             &X[pos], feedback_type);
+                    tm_update(mc_tm_thread[thread_id]->tsetlin_machines[i], &X[pos], 0);
                 }
             }
         }
@@ -759,18 +559,23 @@ void mc_tm_fit_soft_improved(struct MultiClassTsetlinMachine *mc_tm, unsigned in
 
     // Free thread-local TM instances
     for (int t = 0; t < max_threads; t++) {
-        for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {    
+        for (int i = 0; i < mc_tm_thread[t]->number_of_classes; i++) {
             struct TsetlinMachine *tm_thread = mc_tm_thread[t]->tsetlin_machines[i];
             // Free temporary buffers while preserving shared state
             free(tm_thread->clause_output);
             free(tm_thread->output_one_patches);
             free(tm_thread->feedback_to_la);
             free(tm_thread->feedback_to_clauses);
+            free(tm_thread->clause_patch);
             free(tm_thread);
         }
+        free(mc_tm_thread[t]->tsetlin_machines);
+        free(mc_tm_thread[t]);
     }
 
     // Final memory cleanup
-    free(tm->clause_lock);
+    for (int i = 0; i < mc_tm->number_of_classes; i++) {
+        free(mc_tm->tsetlin_machines[i]->clause_lock);
+    }
     free(mc_tm_thread);
 }

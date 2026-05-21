@@ -46,24 +46,22 @@ void mc_tm_initialize_random_streams(struct MultiClassTsetlinMachine *mc_tm, flo
 
 void mc_tm_predict(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, int number_of_examples);
 
-void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, int *class_sums, int number_of_examples);
+void mc_tm_predict_with_class_sums_2d(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *class_sums, int number_of_examples);
 
 void mc_tm_fit(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int y[], int number_of_examples, int epochs);
 
-void mc_tm_get_state(struct MultiClassTsetlinMachine *mc_tm, int class, unsigned int *clause_weights, unsigned int *ta_state);
+void mc_tm_get_state(struct MultiClassTsetlinMachine *mc_tm, int class, float *clause_weights, unsigned int *ta_state);
 
-void mc_tm_set_state(struct MultiClassTsetlinMachine *mc_tm, int class, unsigned int *clause_weights, unsigned int *ta_state);
+void mc_tm_set_state(struct MultiClassTsetlinMachine *mc_tm, int class, float *clause_weights, unsigned int *ta_state);
 
 int mc_tm_ta_state(struct MultiClassTsetlinMachine *mc_tm, int class, int clause, int ta);
 
 int mc_tm_ta_action(struct MultiClassTsetlinMachine *mc_tm, int class, int clause, int ta);
 
-int mc_tm_clause_weight(struct MultiClassTsetlinMachine *mc_tm, int class, int clause);
+float mc_tm_clause_weight(struct MultiClassTsetlinMachine *mc_tm, int class, int clause);
 
 void mc_tm_transform(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X,  unsigned int *X_transformed, int invert, int number_of_examples);
 
 void mc_tm_clause_configuration(struct MultiClassTsetlinMachine *mc_tm, int class, int clause, unsigned int *clause_configuration);
 
-void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs);
-
-void mc_tm_fit_soft_improved(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs, float alpha, float temperature);
+void mc_tm_fit_soft(struct MultiClassTsetlinMachine *mc_tm, unsigned int *X, int *y, float *soft_labels, int number_of_examples, int epochs, float alpha, float temperature);

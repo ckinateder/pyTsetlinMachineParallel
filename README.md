@@ -1,7 +1,6 @@
 # pyTsetlinMachineParallel
 ![License](https://img.shields.io/github/license/microsoft/interpret.svg?style=flat-square) ![Python Version](https://img.shields.io/pypi/pyversions/interpret.svg?style=flat-square) ![Maintenance](https://img.shields.io/maintenance/yes/2023?style=flat-square)
-
-Multi-threaded implementation of the Tsetlin Machine (https://arxiv.org/abs/1804.01508), Convolutional Tsetlin Machine (https://arxiv.org/abs/1905.09688), Regression Tsetlin Machine (https://arxiv.org/abs/1905.04206, https://royalsocietypublishing.org/doi/full/10.1098/rsta.2019.0165, https://link.springer.com/chapter/10.1007/978-3-030-30244-3_23), and Weighted Tsetlin Machines (https://arxiv.org/abs/1911.12607, https://ieeexplore.ieee.org/document/9316190, https://arxiv.org/abs/2002.01245), with support for continuous features (https://arxiv.org/abs/1905.04199, https://link.springer.com/chapter/10.1007%2F978-3-030-22999-3_49) and multigranular clauses (https://arxiv.org/abs/1909.07310, https://link.springer.com/chapter/10.1007/978-3-030-34885-4_11).
+Distribution-enhanced Knowledge Distillation (https://doi.org/10.1016/j.neucom.2026.133605), Multi-threaded implementation of the Tsetlin Machine (https://arxiv.org/abs/1804.01508), Convolutional Tsetlin Machine (https://arxiv.org/abs/1905.09688), Regression Tsetlin Machine (https://arxiv.org/abs/1905.04206, https://royalsocietypublishing.org/doi/full/10.1098/rsta.2019.0165, https://link.springer.com/chapter/10.1007/978-3-030-30244-3_23), and Weighted Tsetlin Machines (https://arxiv.org/abs/1911.12607, https://ieeexplore.ieee.org/document/9316190, https://arxiv.org/abs/2002.01245), with support for continuous features (https://arxiv.org/abs/1905.04199, https://link.springer.com/chapter/10.1007%2F978-3-030-22999-3_49) and multigranular clauses (https://arxiv.org/abs/1909.07310, https://link.springer.com/chapter/10.1007/978-3-030-34885-4_11).
 
 <p align="center">
   <img width="75%" src="https://github.com/olegranmo/blob/blob/master/Weighted_Tsetlin_Machine_Example_Configuration_Full.png">
@@ -25,6 +24,7 @@ Multi-threaded implementation of the Tsetlin Machine (https://arxiv.org/abs/1804
   - [Fashion MNIST 2D Convolution Demo w/Weighted Clauses](#fashion-mnist-2d-convolution-demo-wweighted-clauses)
   - [IMDb Text Categorization Demo](#imdb-text-categorization-demo)
   - [Regression Demo](#regression-demo)
+  - [Distillation Demo](#distillation-demo)
 - [Contributing](#contributing)
 - [Further Work](#further-work)
 - [Requirements](#requirements)
@@ -877,6 +877,46 @@ RMSD over 25 runs:
 #25 RMSD: 0.61 +/- 0.00 (1.02s)
 ```
 
+### Distillation Demo
+
+#### Code: DistillationDemo.py
+
+```python
+def run_epoch(model, x_train, y_train, x_test, y_test, *, soft_labels=None):
+    train_start = perf_counter()
+    if soft_labels is None:
+        model.fit(x_train, y_train, epochs=1, incremental=True)
+    else:
+        model.fit_soft(
+            x_train,
+            y_train,
+            epochs=1,
+            incremental=True,
+            soft_labels=soft_labels,
+            temperature=TEMPERATURE,
+            alpha=ALPHA,
+        )
+    train_time = perf_counter() - train_start
+
+    test_start = perf_counter()
+    test_acc = 100.0 * (model.predict(x_test) == y_test).mean()
+    test_time = perf_counter() - test_start
+    return test_acc, train_time, test_time
+```
+
+#### Output
+
+```bash
+python3 ./DistillationDemo.py
+
+Loaded MNIST: train=(60000, 784), test=(10000, 784), threshold=75/255
+
+Final test accuracy:
+Teacher (best over 20 epochs): 94.47%
+Baseline (last epoch): 89.81%
+Student KD (last epoch): 93.64%
+```
+
 ## Contributing
 
 There is a Docker container available for development purposes. To build the container, run the following command:
@@ -902,7 +942,7 @@ docker run -it --rm  -v $(pwd):$(pwd) pytsetlinmachineparallel bash
 
 ## Requirements
 
-- Python 3.7.x, https://www.python.org/downloads/
+- Python 3.10.x, https://www.python.org/downloads/
 - Numpy, http://www.numpy.org/
 - OpenMP 5.0, https://www.openmp.org/
 - Ubuntu or macOS
@@ -912,6 +952,22 @@ docker run -it --rm  -v $(pwd):$(pwd) pytsetlinmachineparallel bash
 I thank my colleagues from the Centre for Artificial Intelligence Research (CAIR), Lei Jiao, Xuan Zhang, Geir Thore Berge, Darshana Abeyrathna, Saeed Rahimi Gorji, Sondre Glimsdal, Rupsa Saha, Bimal Bhattarai, Rohan K. Yadav, Bernt Viggo Matheussen, Morten Goodwin, Christian Omlin, Vladimir Zadorozhny (University of Pittsburgh), Jivitesh Sharma, and Ahmed Abouzeid, for their contributions to the development of the Tsetlin machine family of techniques. I would also like to thank our House of CAIR partners, Alex Yakovlev, Rishad Shafik, Adrian Wheeldon, Jie Lei, Tousif Rahman (Newcastle University), Jonny Edwards (Temporal Computing), Marco Wiering (University of Groningen), Christian D. Blakely (PwC Switzerland), Adrian Phoulady, Anders Refsdal Olsen, Halvor Smørvik, and Erik Mathisen for their many contributions.
 
 ## Tsetlin Machine Papers
+
+```bash
+@article{KINATEDER2026133605,
+  title = {Distribution-enhanced knowledge distillation},
+  journal = {Neurocomputing},
+  volume = {685},
+  pages = {133605},
+  year = {2026},
+  issn = {0925-2312},
+  doi = {https://doi.org/10.1016/j.neucom.2026.133605},
+  url = {https://www.sciencedirect.com/science/article/pii/S0925231226010027},
+  author = {Calvin Kinateder and Usman Anjum and Justin Zhan},
+  keywords = {Tsetlin machine, Knowledge distillation, Explainable AI, Propositional logic, Classification, Data mining},
+  abstract = {The Tsetlin Machine (TM) is a framework that uses propositional logic to learn patterns from data by creating human-interpretable conjunctive clauses. Similar to neural networks, TM accuracy generally increases with model size, and larger clause sets lead to slower training and higher memory usage. Knowledge distillation (KD) is widely used in neural networks to transfer information from a large teacher model to a smaller student model, improving accuracy without increasing training time. Extending KD to Tsetlin Machines is not straightforward due to the absence of differentiable logits. Consequently, we propose Distribution-Enhanced Knowledge Distillation (DKD), a TM-based framework that adapts KD principles to TMs. DKD transfers knowledge through two mechanisms: (1) an intelligent clause-selection algorithm that identifies and initializes the student with the most informative teacher clauses, and (2) a probability-based distillation scheme that generates soft distributions from the teacher’s unclamped class sums and incorporates them into the student’s training feedback. Together, these components allow the student to learn higher-level decision patterns normally accessible only to a larger TM. Experiments on benchmark image and text datasets demonstrate that DKD consistently improves student accuracy while maintaining inference time when compared to a parametrically identical baseline. This approach effectively narrows the performance gap between teacher and student models, offering a practical path toward deploying compact and interpretable Tsetlin Machines in resource-constrained environments.}
+}
+```
 
 ```bash
 @InProceedings{wheeldon2021self,

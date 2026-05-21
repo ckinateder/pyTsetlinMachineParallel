@@ -6,6 +6,7 @@
 #define C_BITWISE_TSETLIN_MACHINE_FAST_RAND_H
 
 #include <stdint.h>
+#include <math.h>
 
 static uint64_t const multiplier = 6364136223846793005u;
 static uint64_t       mcg_state  = 0xcafef00dd15ea5e5u;

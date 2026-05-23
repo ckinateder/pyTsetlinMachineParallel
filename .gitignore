@@ -10,3 +10,4 @@ CLAUDE.md
 settings.local.json
 .venv/
 results
+!results/*aggregate*

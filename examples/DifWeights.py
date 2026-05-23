@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pickle as pkl
 import os
+import glob
 from copy import deepcopy
 import itertools
 import pandas as pd
@@ -109,15 +110,11 @@ class LogWeightHead(nn.Module):
     Logit for class k:
         logit_k = bias_k + sum_j polarity_j * exp(theta_kj) * clause_output_kj
     """
-    def __init__(self, n_classes, n_clauses, T: float = None, init_weights=None):
+    def __init__(self, n_classes, n_clauses, init_weights=None):
         super().__init__()
 
         self.n_classes = n_classes
         self.n_clauses = n_clauses
-        self.T = T
-        
-        if init_weights is not None and T is not None:
-            print("WARNING: Both init_weights and T are provided - this clamps gradients")
         
         if init_weights is None:
             theta_init = torch.zeros(n_classes, n_clauses)
@@ -151,9 +148,6 @@ class LogWeightHead(nn.Module):
         # [B, K]
         # broadcast the same class-clause weights to all examples
         logits = (Z * signed_weights.unsqueeze(0)).sum(dim=2) + self.bias
-
-        if self.T is not None:
-            logits = logits.clamp(-self.T, self.T)
 
         return logits
 
@@ -306,6 +300,7 @@ def aggregate_experiment_results(
     n_acc = out_rows[0]["n_pooled_accuracy_epochs"] if out_rows else 0
     print(f"\nAggregate summary ({n} seeds; accuracy pooled over {n_acc} per-epoch values) saved to {out_path}")
     print(agg_df.to_string(index=False))
+    write_aggregate_plots_from_csv(out_path)
     return agg_df
 
 
@@ -318,6 +313,23 @@ PLOT_AVG_LAST10_ACCURACY_PNG = "plot_avg_last10_accuracy.png"
 PLOT_AVG_LAST10_TM_TEST_TIME_PNG = "plot_avg_last10_tm_test_time.png"
 PLOT_TOTAL_TRAIN_TIME_PNG = "plot_total_train_time.png"
 PLOT_COMBINED_PNG = "plot_combined.png"
+
+AGGREGATE_PLOT_AVG_LAST10_ACCURACY_SUFFIX = "aggregate_plot_avg_last10_accuracy.png"
+AGGREGATE_PLOT_AVG_LAST10_TM_TEST_TIME_SUFFIX = "aggregate_plot_avg_last10_tm_test_time.png"
+
+_AGGREGATE_CSV_REQUIRED_COLS = (
+    "method",
+    "dataset",
+    "T",
+    "s",
+    "split_point",
+    "total_epochs",
+    "n_seeds",
+    "avg_last10_tm_accuracy_mean",
+    "avg_last10_tm_accuracy_std",
+    "avg_last10_tm_test_time_s_mean",
+    "avg_last10_tm_test_time_s_std",
+)
 
 _SERIF_RCPARAMS = {
     "font.family": "serif",
@@ -431,6 +443,144 @@ def _draw_bar_metric_ax(
     if expand_acc_ylim:
         lo, hi = min(values), max(values)
         ax.set_ylim(lo - (hi - lo) * 0.5, hi + (hi - lo) * 0.2)
+
+
+def _annotate_aggregate_hyperparams_bottom_right(ax, row: pd.Series) -> None:
+    text = (
+        f"T = {row['T']}\n"
+        f"s = {row['s']}\n"
+        f"split = {row['split_point']}\n"
+        f"epochs = {int(row['total_epochs'])}\n"
+        f"seeds = {int(row['n_seeds'])}"
+    )
+    ax.text(
+        0.9, 0.02, text, transform=ax.transAxes, fontsize=9,
+        horizontalalignment="left", verticalalignment="bottom", multialignment="left",
+        bbox=_hparam_legend_matching_bbox(),
+    )
+
+
+def _draw_aggregate_bar_metric_ax(
+    ax,
+    agg_df: pd.DataFrame,
+    color_map: dict[str, str],
+    mean_col: str,
+    std_col: str,
+    ylabel: str,
+    title: str,
+    fmt: str,
+    *,
+    expand_acc_ylim: bool = False,
+) -> None:
+    labels: list[str] = []
+    values: list[float] = []
+    yerrs: list[float | None] = []
+    bar_colors: list[str] = []
+    for method in METHODS_ORDERED:
+        sub = agg_df[agg_df["method"] == method]
+        if sub.empty:
+            continue
+        row = sub.iloc[0]
+        mean_val = row[mean_col]
+        if pd.isna(mean_val):
+            continue
+        labels.append(method)
+        values.append(float(mean_val))
+        std_val = row[std_col]
+        bar_colors.append(color_map[method])
+        yerrs.append(None if pd.isna(std_val) else float(std_val))
+
+    if not labels:
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.set_axisbelow(True)
+        ax.grid(True, alpha=0.3, axis="y")
+        return
+
+    bar_kwargs: dict = {}
+    if any(e is not None for e in yerrs):
+        bar_kwargs["yerr"] = [e if e is not None else np.nan for e in yerrs]
+        bar_kwargs["capsize"] = 4
+        bar_kwargs["error_kw"] = {"ecolor": "black", "elinewidth": 1}
+
+    bars = ax.bar(range(len(labels)), values, color=bar_colors, **bar_kwargs)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_axisbelow(True)
+    ax.grid(True, alpha=0.3, axis="y")
+    for bar, v, err in zip(bars, values, yerrs):
+        y_label = v + (err if err is not None else 0.0)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2, y_label, fmt.format(v),
+            ha="center", va="bottom", fontsize=9,
+        )
+    if expand_acc_ylim:
+        tops = [v + (e if e is not None else 0.0) for v, e in zip(values, yerrs)]
+        lo, hi = min(values), max(tops)
+        ax.set_ylim(lo - (hi - lo) * 0.5, hi + (hi - lo) * 0.2)
+
+
+def write_aggregate_plots_from_csv(csv_path: str) -> None:
+    """Read aggregate summary CSV; write accuracy and inference bar plots with std error bars."""
+    if not os.path.isfile(csv_path):
+        raise FileNotFoundError(f"Missing aggregate summary CSV: {csv_path!r}")
+    agg_df = pd.read_csv(csv_path)
+    missing = [c for c in _AGGREGATE_CSV_REQUIRED_COLS if c not in agg_df.columns]
+    if missing:
+        raise ValueError(f"Aggregate CSV missing columns: {missing}")
+
+    dataset = str(agg_df["dataset"].iloc[0])
+    out_dir = os.path.dirname(os.path.abspath(csv_path)) or "."
+    meta_row = agg_df.iloc[0]
+
+    with plt.rc_context(_SERIF_RCPARAMS):
+        color_map = _plot_color_map()
+
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_aggregate_bar_metric_ax(
+            ax, agg_df, color_map,
+            "avg_last10_tm_accuracy_mean", "avg_last10_tm_accuracy_std",
+            "Avg Last-10 TM Accuracy (%)",
+            f"{dataset} — Avg Last-10 TM Accuracy by Method",
+            "{:.1f}%",
+            expand_acc_ylim=True,
+        )
+        _annotate_aggregate_hyperparams_bottom_right(ax, meta_row)
+        p = os.path.join(out_dir, f"{dataset}_{AGGREGATE_PLOT_AVG_LAST10_ACCURACY_SUFFIX}")
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved plot to {p}")
+
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_aggregate_bar_metric_ax(
+            ax, agg_df, color_map,
+            "avg_last10_tm_test_time_s_mean", "avg_last10_tm_test_time_s_std",
+            "Inference Time (s)",
+            f"{dataset} — Avg Last-10 TM Inference Time",
+            "{:.3f}s",
+        )
+        _annotate_aggregate_hyperparams_bottom_right(ax, meta_row)
+        p = os.path.join(out_dir, f"{dataset}_{AGGREGATE_PLOT_AVG_LAST10_TM_TEST_TIME_SUFFIX}")
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved plot to {p}")
+
+
+def replot_aggregate_from_csv(csv_path: str) -> None:
+    """Alias for write_aggregate_plots_from_csv."""
+    write_aggregate_plots_from_csv(csv_path)
+
+
+def replot_all_aggregate_summaries(results_dir: str = "results") -> None:
+    """Regenerate aggregate plots for every *_aggregate_summary_results.csv under results_dir."""
+    pattern = os.path.join(results_dir, "*_aggregate_summary_results.csv")
+    paths = sorted(glob.glob(pattern))
+    if not paths:
+        raise FileNotFoundError(f"No aggregate summary CSVs matching {pattern!r}")
+    for csv_path in paths:
+        write_aggregate_plots_from_csv(csv_path)
 
 
 def write_result_plots_from_run_dir(run_dir: str) -> None:
@@ -696,7 +846,7 @@ def run_experiment(
     print(f"[3/5] Training WTM-NN (NN phase, {split_two} epochs)")
     frozen_weighted_tm = pkl.load(open(weighted_tm_path, "rb"))
     nn_w = LogWeightHead(n_classes=n_classes, n_clauses=frozen_weighted_tm.number_of_clauses,
-                         T=None, init_weights=frozen_weighted_tm.get_clause_weights())
+                         init_weights=frozen_weighted_tm.get_clause_weights())
     ep = _add("WTM-NN", r_w1, "tm", 1)
     r_nn_w = train_log_weight_head(nn_w, frozen_weighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
     ep = _add("WTM-NN", r_nn_w, "nn", ep)
@@ -707,7 +857,7 @@ def run_experiment(
     # 4. UTM-NN: reuse r_u1 as the TM phase, then train NN
     print(f"[4/5] Training UTM-NN (NN phase, {split_two} epochs)")
     frozen_unweighted_tm = pkl.load(open(unweighted_tm_path, "rb"))
-    nn_u = LogWeightHead(n_classes=n_classes, n_clauses=frozen_unweighted_tm.number_of_clauses, T=None)
+    nn_u = LogWeightHead(n_classes=n_classes, n_clauses=frozen_unweighted_tm.number_of_clauses)
     ep = _add("UTM-NN", r_u1, "tm", 1)
     r_nn_u = train_log_weight_head(nn_u, frozen_unweighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
     ep = _add("UTM-NN", r_nn_u, "nn", ep)
@@ -727,7 +877,7 @@ def run_experiment(
         alt_epoch = _add("Cyclic", r_tm, "tm", alt_epoch)
 
         nn_a = LogWeightHead(n_classes=n_classes, n_clauses=cyclic_tm.number_of_clauses,
-                             T=None, init_weights=cyclic_tm.get_clause_weights())
+                             init_weights=cyclic_tm.get_clause_weights())
         r_nn = train_log_weight_head(nn_a, cyclic_tm, x_train, y_train, x_test, y_test, epochs=epochs_per_round, patience=10)
         alt_epoch = _add("Cyclic", r_nn, "nn", alt_epoch)
 
@@ -844,10 +994,10 @@ if __name__ == "__main__":
     KMNISTDataset = CustomDataset(name="KMNIST", train_dataset=KMNIST(root="data", train=True, download=True), test_dataset=KMNIST(root="data", train=False, download=True))
     
     pairs = [
-        (MNISTDataset, 100, 10  ),
-        (FashionMNISTDataset, 100, 10),
-        (KMNISTDataset, 100, 10),
-        (EMNISTDataset, 300, 10),
+        (MNISTDataset, 100, 25),
+        (FashionMNISTDataset, 100, 25),
+        (KMNISTDataset, 100, 25),
+        (EMNISTDataset, 300, 25),
     ]
 
     for dataset, C, seeds in pairs:

@@ -113,27 +113,30 @@ class LogWeightHead(nn.Module):
     def __init__(self, n_classes, n_clauses, init_weights=None):
         super().__init__()
 
-        self.n_classes = n_classes
-        self.n_clauses = n_clauses
+        self.n_classes = n_classes # number of classes
+        self.n_clauses = n_clauses # number of clauses
         
-        if init_weights is None:
+        if init_weights is None: # training from scratch
             theta_init = torch.zeros(n_classes, n_clauses)
-        else:
+        else: # training from pretrained weighted TM
             init_weights = torch.as_tensor(init_weights, dtype=torch.float32)
             init_weights = torch.clamp(init_weights, min=1e-6)
             theta_init = torch.log(init_weights)
 
+        # real-valued weights
         self.theta = nn.Parameter(theta_init)
-
+        
+        # non-trainable bias
         self.register_buffer("bias", torch.zeros(n_classes))
 
-        polarity = torch.ones(n_clauses)
-        polarity[1::2] = -1.0
+        polarity = torch.ones(n_clauses) # polarity of the clauses
+        polarity[1::2] = -1.0 # negate the polarity of the odd clauses
         self.register_buffer("polarity", polarity)
 
 
     @property
     def weights(self) -> torch.Tensor:
+        # forced positive weights
         return torch.exp(self.theta)
 
     def forward(self, Z: torch.Tensor) -> torch.Tensor:

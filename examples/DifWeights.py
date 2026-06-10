@@ -259,10 +259,18 @@ def aggregate_experiment_results(
     if len(summary_dfs) != n:
         raise ValueError("aggregate_experiment_results: per_epoch_dfs and summary_dfs length mismatch")
 
+    def _mean(vals: list[float]) -> float:
+        arr = np.asarray(vals, dtype=float)
+        if arr.size == 0:
+            return float("nan")
+        return float(np.nanmean(arr))
+
     def _std(vals: list[float]) -> float:
-        if len(vals) < 2:
+        arr = np.asarray(vals, dtype=float)
+        arr = arr[~np.isnan(arr)]
+        if len(arr) < 2:
             return 0.0
-        return float(np.std(vals, ddof=1))
+        return float(np.std(arr, ddof=1))
 
     out_rows = []
     for method in METHODS_ORDERED:
@@ -273,10 +281,15 @@ def aggregate_experiment_results(
         for pe_df, su_df in zip(per_epoch_dfs, summary_dfs):
             mdf = pe_df[pe_df["method"] == method]
             acc_vals.extend(mdf["test_accuracy"].tail(10).astype(float).tolist())
-            tm_train_vals.append(float(mdf[mdf["model_type"] == "tm"]["train_time"].mean()))
             srow = su_df[su_df["method"] == method].iloc[0]
-            inf_vals.append(float(srow["avg_last10_tm_test_time_s"]))
-            tot_vals.append(float(srow["total_train_time_s"]))
+            if mdf.empty:
+                tm_train_vals.append(float("nan"))
+                inf_vals.append(float("nan"))
+                tot_vals.append(float("nan"))
+            else:
+                tm_train_vals.append(float(mdf[mdf["model_type"] == "tm"]["train_time"].mean()))
+                inf_vals.append(float(srow["avg_last10_tm_test_time_s"]))
+                tot_vals.append(float(srow["total_train_time_s"]))
 
         out_rows.append({
             "dataset": dataset_name,
@@ -287,13 +300,13 @@ def aggregate_experiment_results(
             "method": method,
             "n_seeds": n,
             "n_pooled_accuracy_epochs": len(acc_vals),
-            "avg_last10_tm_accuracy_mean": round(float(np.mean(acc_vals)), 4),
+            "avg_last10_tm_accuracy_mean": round(_mean(acc_vals), 4),
             "avg_last10_tm_accuracy_std": round(_std(acc_vals), 4),
-            "avg_tm_epoch_time_s_mean": round(float(np.mean(tm_train_vals)), 4),
+            "avg_tm_epoch_time_s_mean": round(_mean(tm_train_vals), 4),
             "avg_tm_epoch_time_s_std": round(_std(tm_train_vals), 4),
-            "avg_last10_tm_test_time_s_mean": round(float(np.mean(inf_vals)), 4),
+            "avg_last10_tm_test_time_s_mean": round(_mean(inf_vals), 4),
             "avg_last10_tm_test_time_s_std": round(_std(inf_vals), 4),
-            "total_train_time_s_mean": round(float(np.mean(tot_vals)), 2),
+            "total_train_time_s_mean": round(_mean(tot_vals), 2),
             "total_train_time_s_std": round(_std(tot_vals), 2),
         })
 
@@ -431,9 +444,25 @@ def _draw_bar_metric_ax(
     *,
     expand_acc_ylim: bool = False,
 ) -> None:
-    labels = summary_df["method"].tolist()
-    bar_colors = [color_map[m] for m in labels]
-    values = summary_df[value_col].tolist()
+    labels: list[str] = []
+    values: list[float] = []
+    bar_colors: list[str] = []
+    for method in METHODS_ORDERED:
+        sub = summary_df[summary_df["method"] == method]
+        if sub.empty:
+            continue
+        val = sub.iloc[0][value_col]
+        if pd.isna(val):
+            continue
+        labels.append(method)
+        values.append(float(val))
+        bar_colors.append(color_map[method])
+    if not labels:
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.set_axisbelow(True)
+        ax.grid(True, alpha=0.3, axis="y")
+        return
     bars = ax.bar(range(len(labels)), values, color=bar_colors)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
@@ -868,8 +897,6 @@ def run_experiment(
     scaled_weights = scale_weights_for_tm(nn_u, Z_test_u, frozen_unweighted_tm.T)
     frozen_unweighted_tm.set_clause_weights(scaled_weights)
 
-    per_epoch_df = pd.DataFrame(rows)
-    
     # 5. Cyclic
     print(f"[5/5] Cyclic TM⟷NN ({rounds} rounds × {epochs_per_round} epochs each phase)")
     cyclic_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True)
@@ -891,6 +918,8 @@ def run_experiment(
         # copy unscaled weights back so next TM round has a warm start
         cyclic_tm.set_clause_weights(nn_a.weights.detach().cpu().numpy())
     pbar.close()
+
+    per_epoch_df = pd.DataFrame(rows)
 
     # Inference time: single predict call on each final TM with scaled weights.
     # Scaling is a one-time training cost — deployed inference is just predict().

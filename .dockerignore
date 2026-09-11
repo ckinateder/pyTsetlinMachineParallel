@@ -1,0 +1,20 @@
+# Keeps `COPY . .` in the Dockerfile from pulling large/irrelevant local state into
+# the image (datasets, prior experiment output, VCS history, build artifacts).
+.git
+.venv
+.claude
+.cursor
+.devcontainer
+.vscode
+data
+results
+514-results
+build
+*.egg-info
+*.pkl
+*.pyc
+__pycache__
+*.so
+.DS_Store
+.specstory
+GrOTm_ The Gradient Optimized Tsetlin Machine

@@ -1,3 +1,64 @@
+"""
+GrOTm: Gradient-Optimized Tsetlin Machine -- weight comparison experiment
+==========================================================================
+
+Compares four ways of getting clause weights onto a Tsetlin Machine's decision rule:
+    - UTM:     unweighted TM (no weighting at all; every clause counts once)
+    - WTM:     weighted TM using native online (TA-feedback) weight learning
+    - WTM-NN:  WTM frozen partway through training, then a differentiable head
+               (LogWeightHead) gradient-fits real-valued weights on its clause outputs
+    - UTM-NN:  same as WTM-NN, but the frozen base TM is unweighted
+
+For each dataset this reports, per method: per-epoch test accuracy, average
+last-10-epoch test accuracy (the headline metric), training/inference time, paired
+significance tests between each "-NN" method and its base TM, and a weight-resolution
+ablation (does the -NN gain survive collapsing its real-valued weights onto the
+positive-integer domain native training is restricted to?).
+
+WHAT CHANGED IN THIS PASS (context if you're picking this back up):
+    - Held-out validation split: weight-scaling calibration and NN model selection use
+      x_val, never x_test (previously leaked through the test set).
+    - Real per-run seeding (seed_everything) plus a per-run shuffled example order,
+      since the C extension's own RNGs have no seed hook (see seed_everything's
+      docstring) -- this is what gives the n_seeds runs genuine cross-seed variance.
+    - Between-seed std in the aggregate CSV is computed correctly (one scalar per
+      seed, then std across seeds), not pooled per-epoch values across seeds.
+    - The "Cyclic" (TM<->NN alternating) method was removed entirely; see git history
+      from before this pass if it needs to come back.
+    - Added paired significance testing (aggregate_significance_tests: scipy paired
+      t-test + Wilcoxon) and a weight-resolution ablation (weight_resolution_ablation /
+      aggregate_weight_resolution_ablation).
+    - Restructured the output directory layout (below) to separate per-seed detail
+      from cross-seed rollups.
+
+OUTPUT LAYOUT:
+    results/<dataset>_C<C>_T<T>_s<s>_e<total_epochs>/
+        seed_0/ ... seed_<n-1>/   per-seed detail: per_epoch_results.csv,
+                                  summary_results.csv, experiment_metadata.json,
+                                  weight_resolution_ablation.json, two .pkl TM
+                                  checkpoints, five plot_*.png
+        aggregate/                cross-seed rollups: aggregate_summary_results.csv,
+                                  significance_tests.csv,
+                                  weight_resolution_ablation_aggregate.csv
+
+HOW TO RUN:
+    Must run inside the project's Docker container -- the C extension needs a Linux +
+    OpenMP build environment (see CLAUDE.md). From the repo root:
+        docker build -t pytsetlin .
+        docker run --rm -it -v $(pwd):$(pwd) pytsetlin bash
+    The Dockerfile installs requirements.txt and builds the package at image-build
+    time, so a container from that image works out of the box. If you bind-mount your
+    own working copy over it for active development, re-run `pip install -e .` once
+    inside the container so the extension rebuilds against your live source.
+
+    Then, from the repo root inside the container:
+        python examples/DifWeights.py
+    Runs the full sweep configured in __main__ (4 datasets x 5 seeds x 500 epochs by
+    default -- expect hours; a single 5-seed dataset config is on the order of tens of
+    minutes). A (dataset, config, seed) run already on disk (per_epoch_results.csv +
+    summary_results.csv present) is skipped and just replotted on a re-run.
+"""
+
 import json
 import random
 from datetime import datetime, timezone
@@ -15,9 +76,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pickle as pkl
 import os
+import warnings
 from copy import deepcopy
 import itertools
 import pandas as pd
+from scipy import stats
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
@@ -33,6 +96,12 @@ METHODS_ORDERED = ("UTM", "WTM", "WTM-NN", "UTM-NN")
 
 # Per-epoch curve legend and color assignment (intentionally not METHODS_ORDERED).
 METHODS_PLOT_ORDER = ("WTM-NN", "UTM-NN", "UTM", "WTM")
+
+# Pairs for paired significance testing: (treatment, base), matched by seed index.
+# Seed i's treatment run and seed i's base run share the same shuffled train/val split
+# and the same epoch-split_one checkpoint (see run_experiment), so pairing by seed
+# index -- not independently sorted/grouped values -- is the meaningful pairing.
+SIGNIFICANCE_PAIRS: tuple[tuple[str, str], ...] = (("WTM-NN", "WTM"), ("UTM-NN", "UTM"))
 
 # Base seed; run i uses BASE_SEED + i (see __main__).
 BASE_SEED = 1000
@@ -185,6 +254,51 @@ def scale_weights_for_tm(model: LogWeightHead, Z: np.ndarray, T: float, safety: 
     return model.weights.detach().cpu().numpy() * alpha
 
 
+def evaluate_weights_direct(tm: MultiClassTsetlinMachine, weights: np.ndarray, x: np.ndarray, y: np.ndarray) -> float:
+    """Set `weights` directly on a copy of `tm` (no scale_weights_for_tm rescaling) and
+    return test accuracy. Mirrors how native weighted_clauses training uses its own
+    learned weights at inference: raw magnitudes, whatever clamp behavior falls out
+    of them -- not the clamp-avoidance rescaling the main pipeline applies to NN weights.
+    """
+    eval_tm = deepcopy(tm)
+    eval_tm.set_clause_weights(weights)
+    return 100.0 * (eval_tm.predict(x) == y).mean()
+
+
+def integer_round_weights(weights: np.ndarray) -> np.ndarray:
+    """Round to the nearest integer >= 1 -- the domain (positive integers, floor 1)
+    native weighted_clauses training is restricted to by its +/-1.0 update rule
+    (see ConvolutionalTsetlinMachine.c). Used by weight_resolution_ablation below."""
+    return np.maximum(np.round(weights), 1.0).astype(np.float32)
+
+
+def weight_resolution_ablation(
+    method: str,
+    nn_model: LogWeightHead,
+    frozen_tm: MultiClassTsetlinMachine,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+) -> dict:
+    """
+    Isolates weight DOMAIN (continuous reals vs. the positive-integer, floor-1
+    lattice native weighted_clauses training is restricted to) from the choice of
+    OPTIMIZER (gradient descent vs. online TA feedback) -- see the "GrOTm" writeup
+    discussion on the continuous-vs-integer confound. Both numbers below go through
+    the identical evaluate_weights_direct path (no scale_weights_for_tm rescale);
+    rounding is the only difference between them, so any accuracy gap is
+    attributable to weight resolution alone. If int_rounded accuracy holds up close
+    to continuous, the method's gain is not merely from higher numeric precision.
+    """
+    raw_weights = nn_model.weights.detach().cpu().numpy()
+    continuous_acc = evaluate_weights_direct(frozen_tm, raw_weights, x_test, y_test)
+    int_rounded_acc = evaluate_weights_direct(frozen_tm, integer_round_weights(raw_weights), x_test, y_test)
+    return {
+        f"{method}_direct_continuous_test_accuracy": continuous_acc,
+        f"{method}_direct_int_rounded_test_accuracy": int_rounded_acc,
+        f"{method}_weight_resolution_gap": continuous_acc - int_rounded_acc,
+    }
+
+
 def train_log_weight_head(
     model: LogWeightHead,
     tm: MultiClassTsetlinMachine,
@@ -261,6 +375,14 @@ def train_log_weight_head(
     model.theta.data.copy_(best_theta)
     return results
 
+def _std(vals: list[float]) -> float:
+    """Sample std, ddof=1. Returns 0.0 for <2 values (not NaN) -- "one observation, no
+    spread" is a meaningful state for the between-seed rollups that use this."""
+    if len(vals) < 2:
+        return 0.0
+    return float(np.std(vals, ddof=1))
+
+
 def aggregate_experiment_results(
     dataset_name: str,
     per_epoch_dfs: list[pd.DataFrame],
@@ -291,11 +413,6 @@ def aggregate_experiment_results(
         raise ValueError("aggregate_experiment_results: no runs")
     if len(summary_dfs) != n:
         raise ValueError("aggregate_experiment_results: per_epoch_dfs and summary_dfs length mismatch")
-
-    def _std(vals: list[float]) -> float:
-        if len(vals) < 2:
-            return 0.0
-        return float(np.std(vals, ddof=1))
 
     out_rows = []
     for method in METHODS_ORDERED:
@@ -332,11 +449,167 @@ def aggregate_experiment_results(
         })
 
     agg_df = pd.DataFrame(out_rows)
-    out_path = os.path.join(save_path, f"{dataset_name}_aggregate_summary_results.csv")
+    os.makedirs(save_path, exist_ok=True)  # save_path is a per-config "aggregate/" dir, may not exist yet
+    out_path = os.path.join(save_path, AGGREGATE_SUMMARY_RESULTS_FILENAME)
     agg_df.to_csv(out_path, index=False)
     print(f"\nAggregate summary (mean +/- between-seed std over {n} seeds) saved to {out_path}")
     print(agg_df.to_string(index=False))
     return agg_df
+
+
+def aggregate_significance_tests(
+    dataset_name: str,
+    per_epoch_dfs: list[pd.DataFrame],
+    save_path: str,
+    *,
+    pairs: tuple[tuple[str, str], ...] = SIGNIFICANCE_PAIRS,
+    total_epochs: int | None = None,
+    T: int | None = None,
+    s: float | None = None,
+) -> pd.DataFrame:
+    """
+    Paired significance testing between each (treatment, base) method pair in `pairs`,
+    matched by seed index: seed i's treatment run and seed i's base run share the same
+    shuffled train/val split and the same epoch-split_one checkpoint (see run_experiment),
+    so pairing by seed index -- not independently sorted/grouped values -- is the
+    statistically meaningful pairing.
+
+    Per pair: reduces each seed's per_epoch_df to one avg-last-10 test_accuracy scalar per
+    method (same reduction as compute_summary_df / aggregate_experiment_results), then runs:
+      - scipy.stats.ttest_rel: paired t-test, the primary/more informative statistic here.
+      - scipy.stats.wilcoxon: paired non-parametric test, secondary robustness check only.
+        NOTE: with n_seeds=5 the minimum achievable two-sided wilcoxon p-value is 0.0625
+        (2**-4) -- it can never report p < 0.05 at this sample size, so treat it as
+        supporting evidence, not a pass/fail gate.
+    Also reports the raw paired differences (mean_diff, std_diff; ddof=1 via the
+    module-level _std) since at n=5 that is arguably more informative than either p-value.
+
+    Degenerate-input handling (must not crash a multi-hour sweep):
+      - n_pairs < 2: both tests are skipped; p-values are NaN, wilcoxon_note explains why.
+      - ttest_rel on zero-variance differences returns NaN statistic/p-value without
+        raising (scipy's normal behavior, possibly with a RuntimeWarning) -- warnings are
+        suppressed and the NaN is written as-is.
+      - wilcoxon raises ValueError when all paired differences are exactly zero (the
+        default zero-handling method requires at least one non-zero diff) -- caught,
+        wilcoxon_statistic/pvalue left NaN, wilcoxon_note set to the exception message.
+
+    Writes one row per pair to {save_path}/significance_tests.csv with columns:
+        dataset, total_epochs, T, s, treatment_method, base_method, n_pairs,
+        treatment_mean, base_mean, mean_diff, std_diff,
+        ttest_statistic, ttest_pvalue, wilcoxon_statistic, wilcoxon_pvalue, wilcoxon_note
+    """
+    os.makedirs(save_path, exist_ok=True)
+    rows = []
+    for treatment, base in pairs:
+        treat_vals, base_vals = [], []
+        for pe_df in per_epoch_dfs:
+            treat_vals.append(float(pe_df[pe_df["method"] == treatment]["test_accuracy"].tail(10).mean()))
+            base_vals.append(float(pe_df[pe_df["method"] == base]["test_accuracy"].tail(10).mean()))
+        treat_arr, base_arr = np.array(treat_vals), np.array(base_vals)
+        diffs = treat_arr - base_arr
+        n_pairs = len(diffs)
+
+        ttest_stat, ttest_p = float("nan"), float("nan")
+        wilcoxon_stat, wilcoxon_p, wilcoxon_note = float("nan"), float("nan"), ""
+        if n_pairs >= 2:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                tres = stats.ttest_rel(treat_arr, base_arr)
+            ttest_stat, ttest_p = float(tres.statistic), float(tres.pvalue)
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    wres = stats.wilcoxon(treat_arr, base_arr)
+                wilcoxon_stat, wilcoxon_p = float(wres.statistic), float(wres.pvalue)
+            except ValueError as e:
+                wilcoxon_note = str(e)
+        else:
+            wilcoxon_note = "n_pairs < 2, skipped"
+
+        rows.append({
+            "dataset": dataset_name, "total_epochs": total_epochs, "T": T, "s": s,
+            "treatment_method": treatment, "base_method": base, "n_pairs": n_pairs,
+            "treatment_mean": round(float(np.mean(treat_arr)), 4) if n_pairs else float("nan"),
+            "base_mean": round(float(np.mean(base_arr)), 4) if n_pairs else float("nan"),
+            "mean_diff": round(float(np.mean(diffs)), 4) if n_pairs else float("nan"),
+            "std_diff": round(_std(list(diffs)), 4),
+            "ttest_statistic": ttest_stat, "ttest_pvalue": ttest_p,
+            "wilcoxon_statistic": wilcoxon_stat, "wilcoxon_pvalue": wilcoxon_p,
+            "wilcoxon_note": wilcoxon_note,
+        })
+
+    df = pd.DataFrame(rows)
+    out_path = os.path.join(save_path, SIGNIFICANCE_TESTS_FILENAME)
+    df.to_csv(out_path, index=False)
+    print(f"\nSignificance tests saved to {out_path}")
+    print(df.to_string(index=False))
+    return df
+
+
+def aggregate_weight_resolution_ablation(
+    dataset_name: str,
+    ablations: list[dict | None],
+    save_path: str,
+    *,
+    total_epochs: int | None = None,
+    T: int | None = None,
+    s: float | None = None,
+) -> pd.DataFrame:
+    """
+    Aggregates per-seed weight_resolution_ablation dicts (see weight_resolution_ablation()
+    and run_experiment's 3rd return value) across seeds, mean/std (ddof=1, via the
+    module-level _std) per method in ("WTM-NN", "UTM-NN"). Seeds whose ablation entry is
+    None are skipped (e.g. a cache-hit run whose weight_resolution_ablation.json is
+    missing on disk) -- n_available reports how many of n_seeds_total actually
+    contributed, so a partially-populated aggregate stays visible rather than silently
+    averaging fewer seeds than the run count implies.
+
+    NOTE: unlike _std's own 0.0-for-<2-values convention (kept as-is here too when at
+    least one seed is available), an EMPTY list here (n_available == 0) reports NaN
+    rather than 0.0 for every mean/std column, since "zero seeds had ablation data" is a
+    materially different, worse state than "one seed had ablation data with std 0" and
+    collapsing them to the same 0.0 would be misleading.
+
+    Writes one row per method to {save_path}/weight_resolution_ablation_aggregate.csv with
+    columns:
+        dataset, total_epochs, T, s, method, n_seeds_total, n_available,
+        direct_continuous_test_accuracy_mean, direct_continuous_test_accuracy_std,
+        direct_int_rounded_test_accuracy_mean, direct_int_rounded_test_accuracy_std,
+        weight_resolution_gap_mean, weight_resolution_gap_std
+    """
+    os.makedirs(save_path, exist_ok=True)
+    n_total = len(ablations)
+    available = [a for a in ablations if a is not None]
+
+    def _mean_or_nan(vals: list[float]) -> float:
+        return round(float(np.mean(vals)), 4) if vals else float("nan")
+
+    def _std_or_nan(vals: list[float]) -> float:
+        return round(_std(vals), 4) if vals else float("nan")
+
+    rows = []
+    for method in ("WTM-NN", "UTM-NN"):
+        cont_vals = [a[f"{method}_direct_continuous_test_accuracy"] for a in available]
+        rounded_vals = [a[f"{method}_direct_int_rounded_test_accuracy"] for a in available]
+        gap_vals = [a[f"{method}_weight_resolution_gap"] for a in available]
+        rows.append({
+            "dataset": dataset_name, "total_epochs": total_epochs, "T": T, "s": s,
+            "method": method, "n_seeds_total": n_total, "n_available": len(cont_vals),
+            "direct_continuous_test_accuracy_mean": _mean_or_nan(cont_vals),
+            "direct_continuous_test_accuracy_std": _std_or_nan(cont_vals),
+            "direct_int_rounded_test_accuracy_mean": _mean_or_nan(rounded_vals),
+            "direct_int_rounded_test_accuracy_std": _std_or_nan(rounded_vals),
+            "weight_resolution_gap_mean": _mean_or_nan(gap_vals),
+            "weight_resolution_gap_std": _std_or_nan(gap_vals),
+        })
+
+    df = pd.DataFrame(rows)
+    out_path = os.path.join(save_path, WEIGHT_RESOLUTION_ABLATION_AGGREGATE_FILENAME)
+    df.to_csv(out_path, index=False)
+    n_avail = len(available)
+    print(f"\nWeight-resolution ablation aggregate saved to {out_path} ({n_avail}/{n_total} seeds had ablation data)")
+    print(df.to_string(index=False))
+    return df
 
 
 EXPERIMENT_METADATA_FILENAME = "experiment_metadata.json"
@@ -348,6 +621,16 @@ PLOT_AVG_LAST10_ACCURACY_PNG = "plot_avg_last10_accuracy.png"
 PLOT_AVG_LAST10_TM_TEST_TIME_PNG = "plot_avg_last10_tm_test_time.png"
 PLOT_TOTAL_TRAIN_TIME_PNG = "plot_total_train_time.png"
 PLOT_COMBINED_PNG = "plot_combined.png"
+
+# Output-tree filename/dirname constants (see run_experiment / __main__ for the layout):
+#   results/<dataset>_C<C>_T<T>_s<s>_e<total_epochs>/seed_<i>/...       per-seed detail
+#   results/<dataset>_C<C>_T<T>_s<s>_e<total_epochs>/aggregate/...      cross-seed rollups
+WEIGHT_RESOLUTION_ABLATION_FILENAME = "weight_resolution_ablation.json"
+AGGREGATE_DIRNAME = "aggregate"
+SEED_DIR_PREFIX = "seed_"
+AGGREGATE_SUMMARY_RESULTS_FILENAME = "aggregate_summary_results.csv"
+SIGNIFICANCE_TESTS_FILENAME = "significance_tests.csv"
+WEIGHT_RESOLUTION_ABLATION_AGGREGATE_FILENAME = "weight_resolution_ablation_aggregate.csv"
 
 _SERIF_RCPARAMS = {
     "font.family": "serif",
@@ -589,6 +872,11 @@ def write_experiment_metadata(
         json.dump(payload, f, indent=2)
 
 
+def _config_dir(save_path: str, dataset_name: str, C: int, T: int, s: float, total_epochs: int) -> str:
+    """Per-(dataset, hyperparameter-config) directory; parent of every seed_N/ and aggregate/ subdir."""
+    return os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}")
+
+
 def run_experiment(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -600,10 +888,12 @@ def run_experiment(
     number_of_state_bits: int,
     total_epochs: int,
     save_path: str,
+    seed_index: int, # 0-based; builds the seed_<seed_index> subdir. Distinct from the RNG
+                      # seed value (BASE_SEED + i) passed separately to seed_everything.
     split_point: float = 0.5, # TM-phase fraction for WTM-NN / UTM-NN
-    dataset_name: str = "MNIST",
+    dataset_name: str = "MNIST", # plain dataset name -- seed identity lives in the directory, not here
     val_fraction: float = 0.1, # held out from x_train for weight scaling + best_theta selection
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, dict | None]:
     """
     Run experiment with given parameters. This will compare the following methods:
     - UTM: unweighted TM trained for total_epochs epochs (checkpoint pickled at split_one)
@@ -624,6 +914,9 @@ def run_experiment(
             method, epoch, model_type ("tm" | "nn"), test_accuracy, train_time, test_time
         summary_df: one row per method with columns:
             method, final_tm_accuracy, avg_tm_epoch_time_s
+        ablation: dict from weight_resolution_ablation (fresh run), the same dict reloaded
+            from weight_resolution_ablation.json (cache-hit skip, if that file exists), or
+            None (cache-hit skip with no such file -- e.g. a run predating this field).
 
     Training metrics from train_tm / train_log_weight_head are list[EpochResult]: one dict per epoch
     with keys test_accuracy, test_time, train_time (see EpochResult near the top of this file).
@@ -655,7 +948,8 @@ def run_experiment(
     On skip (cached CSVs), plots are always regenerated; metadata must exist or FileNotFoundError is raised.
     """
     n_classes = len(np.unique(y_train))
-    run_dir = os.path.join(save_path, f"{dataset_name}_C{C}_T{T}_s{s}_e{total_epochs}")
+    config_dir = _config_dir(save_path, dataset_name, C, T, s, total_epochs)
+    run_dir = os.path.join(config_dir, f"{SEED_DIR_PREFIX}{seed_index}")
     per_epoch_csv = os.path.join(run_dir, "per_epoch_results.csv")
     summary_csv = os.path.join(run_dir, "summary_results.csv")
     metadata_json = os.path.join(run_dir, EXPERIMENT_METADATA_FILENAME)
@@ -670,7 +964,13 @@ def run_experiment(
         per_epoch_df = pd.read_csv(per_epoch_csv)
         summary_df = compute_summary_df(per_epoch_df)
         write_result_plots_from_run_dir(run_dir)
-        return per_epoch_df, summary_df
+        ablation_json_path = os.path.join(run_dir, WEIGHT_RESOLUTION_ABLATION_FILENAME)
+        if os.path.isfile(ablation_json_path):
+            with open(ablation_json_path, encoding="utf-8") as f:
+                ablation = json.load(f)
+        else:
+            ablation = None
+        return per_epoch_df, summary_df, ablation
 
     os.makedirs(run_dir, exist_ok=True)
 
@@ -688,8 +988,9 @@ def run_experiment(
     split_one = int(total_epochs * split_point)
     split_two = total_epochs - split_one
 
-    unweighted_tm_path = os.path.join(run_dir, f"unweighted_tm_C{C}_T{T}_s{s}.pkl")
-    weighted_tm_path = os.path.join(run_dir, f"weighted_tm_C{C}_T{T}_s{s}.pkl")
+    # No _C{C}_T{T}_s{s} suffix needed: run_dir already sits under a config_dir that encodes them.
+    unweighted_tm_path = os.path.join(run_dir, "unweighted_tm.pkl")
+    weighted_tm_path = os.path.join(run_dir, "weighted_tm.pkl")
 
     rows: list[dict] = []
 
@@ -744,6 +1045,24 @@ def run_experiment(
     scaled_weights = scale_weights_for_tm(nn_u, Z_val_u, frozen_unweighted_tm.T)
     frozen_unweighted_tm.set_clause_weights(scaled_weights)
 
+    # Weight-resolution ablation: does the WTM-NN / UTM-NN gain survive collapsing
+    # their gradient-fit real-valued weights onto the positive-integer, floor-1
+    # lattice native weighted_clauses training is restricted to? Cheap (no
+    # retraining) diagnostic for the continuous-vs-integer confound; not run on a
+    # cache-hit skip since nn_w/nn_u aren't reconstructable from the cached CSVs.
+    native_weights = weighted_tm.get_clause_weights()
+    ablation = {
+        "native_WTM_weight_min": float(native_weights.min()),
+        "native_WTM_weight_max": float(native_weights.max()),
+    }
+    ablation.update(weight_resolution_ablation("WTM-NN", nn_w, frozen_weighted_tm, x_test, y_test))
+    ablation.update(weight_resolution_ablation("UTM-NN", nn_u, frozen_unweighted_tm, x_test, y_test))
+    with open(os.path.join(run_dir, WEIGHT_RESOLUTION_ABLATION_FILENAME), "w", encoding="utf-8") as f:
+        json.dump(ablation, f, indent=2)
+    print("\nWeight-resolution ablation (no clamp-avoidance rescale; rounding is the only difference within each pair):")
+    for k, v in ablation.items():
+        print(f"  {k}: {v}")
+
     per_epoch_df = pd.DataFrame(rows)
 
     # Inference time: single predict call on each final TM with scaled weights.
@@ -774,7 +1093,7 @@ def run_experiment(
     )
     write_result_plots_from_run_dir(run_dir)
 
-    return per_epoch_df, summary_df
+    return per_epoch_df, summary_df, ablation
 
 
 @dataclass
@@ -791,23 +1110,25 @@ class ExperimentConfig:
     total_epochs: int
     split_point: float
     dataset_name: str
+    seed_index: int
     train_dataset: Dataset
     test_dataset: Dataset
     save_path: str
     val_fraction: float = 0.1
     def run(self):
         x_train, y_train, x_test, y_test = binarize_dataset(self.train_dataset, self.test_dataset)
-        per_epoch_df, summary_df = run_experiment(
+        per_epoch_df, summary_df, ablation = run_experiment(
             x_train, y_train, x_test, y_test,
             C=self.C, T=self.T, s=self.s,
             number_of_state_bits=self.number_of_state_bits,
             total_epochs=self.total_epochs,
             split_point=self.split_point,
             dataset_name=self.dataset_name,
+            seed_index=self.seed_index,
             save_path=self.save_path,
             val_fraction=self.val_fraction,
         )
-        return per_epoch_df, summary_df
+        return per_epoch_df, summary_df, ablation
 
 
 if __name__ == "__main__":
@@ -854,6 +1175,7 @@ if __name__ == "__main__":
 
         per_epoch_dfs = []
         summary_dfs = []
+        ablations = []
 
         for i in range(seeds):
             seed_everything(BASE_SEED + i)
@@ -863,24 +1185,46 @@ if __name__ == "__main__":
                 number_of_state_bits=number_of_state_bits,
                 total_epochs=total_epochs,
                 split_point=split_point,
-                dataset_name=f"{dataset.name}_r{i}",
+                dataset_name=dataset.name,
+                seed_index=i,
                 train_dataset=dataset.train_dataset,
                 test_dataset=dataset.test_dataset,
                 save_path="results",
                 val_fraction=val_fraction,
             )
-            per_epoch_df, summary_df = config.run()
+            per_epoch_df, summary_df, ablation = config.run()
             per_epoch_dfs.append(per_epoch_df)
             summary_dfs.append(summary_df)
+            ablations.append(ablation)
+
+        config_dir = _config_dir("results", dataset.name, C, T, s, total_epochs)
+        aggregate_dir = os.path.join(config_dir, AGGREGATE_DIRNAME)
+        os.makedirs(aggregate_dir, exist_ok=True)
 
         aggregate_experiment_results(
             dataset_name=dataset.name,
             per_epoch_dfs=per_epoch_dfs,
             summary_dfs=summary_dfs,
-            save_path="results",
+            save_path=aggregate_dir,
             total_epochs=total_epochs,
             T=T,
             s=s,
             split_point=split_point,
             val_fraction=val_fraction,
+        )
+        aggregate_significance_tests(
+            dataset_name=dataset.name,
+            per_epoch_dfs=per_epoch_dfs,
+            save_path=aggregate_dir,
+            total_epochs=total_epochs,
+            T=T,
+            s=s,
+        )
+        aggregate_weight_resolution_ablation(
+            dataset_name=dataset.name,
+            ablations=ablations,
+            save_path=aggregate_dir,
+            total_epochs=total_epochs,
+            T=T,
+            s=s,
         )

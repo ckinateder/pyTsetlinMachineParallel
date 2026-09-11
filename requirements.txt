@@ -1,0 +1,10 @@
+# Dependencies for the example scripts under examples/ (e.g. DifWeights.py).
+# The pyTsetlinMachineParallel package itself is installed separately via
+# `pip install -e .` (builds the libTM C extension -- see Dockerfile / README).
+numpy
+pandas
+matplotlib
+tqdm
+torch
+torchvision
+scipy

@@ -34,21 +34,28 @@ WHAT CHANGED IN THIS PASS (context if you're picking this back up):
       not matplotlib's default cycle. Bar charts support error bars and significance
       brackets. Added a seed-averaged per-epoch accuracy chart (+/-1 std band), a
       weight-resolution-ablation chart (per-seed and aggregate), and a
-      "{method}_baseline_test_accuracy" field on the ablation JSON/CSV so the
+      "{base_method}_baseline_test_accuracy" field on the ablation JSON/CSV so the
       continuous/int-rounded numbers can be read against the native TM's own accuracy
       without cross-referencing summary_results.csv. NOT backward compatible with
       weight_resolution_ablation.json files from before this field existed.
+    - Added a wall-clock ("Accuracy vs. Training Time") variant of the per-epoch chart
+      (per-seed and aggregate) -- an epoch is not a fixed unit of compute, so this is
+      the fair "who gets further for equal compute" comparison the epoch-indexed
+      chart can't give. Also added a "Shared checkpoint" marker on the epoch-indexed
+      charts at split_one: WTM-NN/UTM-NN's TM phase literally reuses WTM's/UTM's own
+      first-phase results, so the lines are identical data before that point.
 
 OUTPUT LAYOUT:
     results/<dataset>_C<C>_T<T>_s<s>_e<total_epochs>/
         seed_0/ ... seed_<n-1>/   per-seed detail: per_epoch_results.csv,
                                   summary_results.csv, experiment_metadata.json,
-                                  weight_resolution_ablation.json, two .pkl TM
-                                  checkpoints, six plot_*.png
+                                  weight_resolution_ablation.json, seven plot_*.png
+                                  (the two .pkl TM checkpoints are transient -- deleted
+                                  once loaded, not left behind)
         aggregate/                cross-seed rollups: aggregate_summary_results.csv,
                                   significance_tests.csv,
                                   weight_resolution_ablation_aggregate.csv,
-                                  five plot_aggregate_*.png
+                                  six plot_aggregate_*.png
 
 HOW TO RUN:
     Must run inside the project's Docker container -- the C extension needs a Linux +
@@ -653,16 +660,19 @@ def aggregate_weight_resolution_ablation(
 EXPERIMENT_METADATA_FILENAME = "experiment_metadata.json"
 EXPERIMENT_METADATA_SCHEMA_VERSION = 3
 
-# Six PNGs per seed (no results.png): four singles + one 2x2 combined + one ablation.
+# Seven PNGs per seed (no results.png): four singles + one 2x2 combined + one
+# ablation + one wall-clock accuracy (epoch is not a fixed unit of compute).
 PLOT_PER_EPOCH_ACCURACY_PNG = "plot_per_epoch_accuracy.png"
+PLOT_PER_EPOCH_ACCURACY_BY_TIME_PNG = "plot_per_epoch_accuracy_by_time.png"
 PLOT_AVG_LAST10_ACCURACY_PNG = "plot_avg_last10_accuracy.png"
 PLOT_AVG_LAST10_TM_TEST_TIME_PNG = "plot_avg_last10_tm_test_time.png"
 PLOT_TOTAL_TRAIN_TIME_PNG = "plot_total_train_time.png"
 PLOT_COMBINED_PNG = "plot_combined.png"
 PLOT_WEIGHT_RESOLUTION_ABLATION_PNG = "plot_weight_resolution_ablation.png"
 
-# Five PNGs per dataset, written once after the seed loop by write_aggregate_plots.
+# Six PNGs per dataset, written once after the seed loop by write_aggregate_plots.
 PLOT_AGGREGATE_PER_EPOCH_ACCURACY_PNG = "plot_aggregate_per_epoch_accuracy.png"
+PLOT_AGGREGATE_PER_EPOCH_ACCURACY_BY_TIME_PNG = "plot_aggregate_per_epoch_accuracy_by_time.png"
 PLOT_AGGREGATE_ACCURACY_PNG = "plot_aggregate_accuracy.png"
 PLOT_AGGREGATE_TEST_TIME_PNG = "plot_aggregate_test_time.png"
 PLOT_AGGREGATE_TRAIN_TIME_PNG = "plot_aggregate_train_time.png"
@@ -745,7 +755,8 @@ def _annotate_hyperparams_epoch_left_of_legend(ax, meta: dict) -> None:
 
 
 def _draw_per_epoch_accuracy_ax(
-    ax, per_epoch_df: pd.DataFrame, color_map: dict[str, str], *, std_col: str | None = None,
+    ax, per_epoch_df: pd.DataFrame, color_map: dict[str, str], *,
+    std_col: str | None = None, x_col: str = "epoch", x_label: str = "Epoch",
 ) -> None:
     """
     std_col, when given, shades a +/-1 sample-std band (not SEM, not a CI -- matches
@@ -753,11 +764,17 @@ def _draw_per_epoch_accuracy_ax(
     using a column already present on per_epoch_df (see _aggregate_per_epoch). No band
     is drawn on the trailing dotted flat-continuation below, since that segment is an
     extrapolated placeholder, not real per-epoch data.
+
+    x_col/x_label let the same line-drawing logic serve either the epoch-indexed chart
+    (x_col="epoch", the default) or the wall-clock chart (x_col="cumulative_train_time_s",
+    see _add_cumulative_time) -- an epoch is not a fixed unit of compute (a TM epoch
+    costs far more than an NN epoch), so the wall-clock variant is the one to trust for
+    an apples-to-apples "who gets further for the same compute" comparison.
     """
-    max_epoch = per_epoch_df["epoch"].max()
+    max_x = per_epoch_df[x_col].max()
     for method in METHODS_PLOT_ORDER:
         color = color_map[method]
-        train_df = per_epoch_df[per_epoch_df["method"] == method].sort_values("epoch").reset_index(drop=True)
+        train_df = per_epoch_df[per_epoch_df["method"] == method].sort_values(x_col).reset_index(drop=True)
         if train_df.empty:
             continue
         train_df = train_df.copy()
@@ -767,26 +784,26 @@ def _draw_per_epoch_accuracy_ax(
             ls = "--" if seg["model_type"].iloc[0] == "nn" else "-"
             if seg_id > train_df["segment"].min():
                 prev = train_df[train_df["segment"] == seg_id - 1].iloc[-1]
-                epochs = [prev["epoch"]] + list(seg["epoch"])
+                xs = [prev[x_col]] + list(seg[x_col])
                 accs = [prev["test_accuracy"]] + list(seg["test_accuracy"])
                 stds = [prev[std_col]] + list(seg[std_col]) if std_col is not None else None
             else:
-                epochs = list(seg["epoch"])
+                xs = list(seg[x_col])
                 accs = list(seg["test_accuracy"])
                 stds = list(seg[std_col]) if std_col is not None else None
-            ax.plot(epochs, accs, color=color, linestyle=ls, linewidth=1.5, label=method if first else "_nolegend_")
+            ax.plot(xs, accs, color=color, linestyle=ls, linewidth=1.5, label=method if first else "_nolegend_")
             if stds is not None:
                 lo = [a - s for a, s in zip(accs, stds)]
                 hi = [a + s for a, s in zip(accs, stds)]
-                ax.fill_between(epochs, lo, hi, color=color, alpha=0.15, linewidth=0)
+                ax.fill_between(xs, lo, hi, color=color, alpha=0.15, linewidth=0)
             first = False
         last = train_df.iloc[-1]
-        if last["epoch"] < max_epoch:
+        if last[x_col] < max_x:
             ax.plot(
-                [last["epoch"], max_epoch], [last["test_accuracy"]] * 2,
+                [last[x_col], max_x], [last["test_accuracy"]] * 2,
                 color=color, linestyle=":", linewidth=1.0, alpha=0.4,
             )
-    ax.set_xlabel("Epoch")
+    ax.set_xlabel(x_label)
     ax.set_ylabel("Test Accuracy (%)")
     ax.set_title("Per-Epoch Accuracy")
     ax.grid(True, alpha=0.3, zorder=0)
@@ -796,6 +813,35 @@ def _draw_per_epoch_accuracy_ax(
         Line2D([0], [0], color="black", linestyle="--", label="NN training"),
     ]
     ax.legend(handles=method_handles + style_handles, fontsize=8, loc="lower right")
+
+
+def _add_cumulative_time(per_epoch_df: pd.DataFrame, time_col: str = "train_time") -> pd.DataFrame:
+    """
+    Adds cumulative_train_time_s: per-method cumulative sum of time_col, sorted by
+    epoch. An epoch is not a fixed unit of compute -- a TM epoch (OpenMP clause/TA
+    updates) costs far more wall-clock than an NN epoch (a small linear head over
+    precomputed clause outputs) -- so plotting accuracy against actual elapsed
+    training time, not epoch index, is the fair "who gets further for equal compute"
+    comparison. Works on both a per-seed per_epoch_df (has train_time directly) and
+    an _aggregate_per_epoch result (has a mean train_time column of the same name).
+    """
+    df = per_epoch_df.sort_values(["method", "epoch"]).copy()
+    df["cumulative_train_time_s"] = df.groupby("method")[time_col].cumsum()
+    return df
+
+
+def _annotate_checkpoint(ax, x_value: float, label: str = "Shared checkpoint") -> None:
+    """
+    Vertical marker at the point WTM-NN/UTM-NN branch off from the still-training
+    WTM/UTM. Both lines are literally the same data before this point -- WTM-NN's TM
+    phase reuses WTM's own first-phase per-epoch results (same trained object) -- so
+    this makes explicit, rather than leaving the reader to notice, that the two
+    methods start from an identical shared state.
+    """
+    ylim = ax.get_ylim()
+    ax.axvline(x_value, color="black", linestyle=":", linewidth=1.0, alpha=0.5)
+    ax.text(x_value, ylim[0] + (ylim[1] - ylim[0]) * 0.02, f" {label}", ha="left", va="bottom",
+             fontsize=8, alpha=0.7, rotation=90)
 
 
 def _significance_stars(p: float) -> str:
@@ -885,12 +931,15 @@ def _aggregate_per_epoch(per_epoch_dfs: list[pd.DataFrame]) -> pd.DataFrame:
     the module's own _std helper already treats <2 values as 0.0, matched here).
     model_type is taken via .first() per group, assuming it's consistent across seeds
     for the same (method, epoch) -- true here since every seed in one aggregate shares
-    total_epochs / split_point / hyperparameters.
+    total_epochs / split_point / hyperparameters. train_time is also averaged (mean
+    across seeds) so _add_cumulative_time can build a wall-clock x-axis on top of this
+    result too, not just on a single seed's per_epoch_df.
     """
     combined = pd.concat(per_epoch_dfs, ignore_index=True)
     grouped = combined.groupby(["method", "epoch"], as_index=False).agg(
         test_accuracy=("test_accuracy", "mean"),
         test_accuracy_std=("test_accuracy", "std"),
+        train_time=("train_time", "mean"),
         model_type=("model_type", "first"),
     )
     grouped["test_accuracy_std"] = grouped["test_accuracy_std"].fillna(0.0)
@@ -953,7 +1002,7 @@ def _draw_weight_resolution_ablation_ax(ax, method_data: list[dict], title: str)
 
 def write_result_plots_from_run_dir(run_dir: str) -> None:
     """
-    Read per_epoch_results.csv + experiment_metadata.json; compute summary in memory; write six PNGs.
+    Read per_epoch_results.csv + experiment_metadata.json; compute summary in memory; write seven PNGs.
 
     Raises:
         FileNotFoundError: if metadata or per-epoch CSV is missing.
@@ -970,6 +1019,7 @@ def write_result_plots_from_run_dir(run_dir: str) -> None:
         meta = json.load(f)
     per_epoch_df = pd.read_csv(per_epoch_path)
     summary_df = compute_summary_df(per_epoch_df)
+    split_one = int(meta["total_epochs"] * meta["split_point"])
     saved: list[str] = []
 
     with plt.rc_context(_SERIF_RCPARAMS):
@@ -977,11 +1027,27 @@ def write_result_plots_from_run_dir(run_dir: str) -> None:
 
         fig, ax = plt.subplots(figsize=(9, 6))
         _draw_per_epoch_accuracy_ax(ax, per_epoch_df, color_map)
+        _annotate_checkpoint(ax, split_one)
         _annotate_hyperparams_epoch_left_of_legend(ax, meta)
         p = os.path.join(run_dir, PLOT_PER_EPOCH_ACCURACY_PNG)
         fig.savefig(p, dpi=150, bbox_inches="tight")
         plt.close(fig)
         saved.append(PLOT_PER_EPOCH_ACCURACY_PNG)
+
+        # Wall-clock variant: an epoch is not a fixed unit of compute (a TM epoch
+        # costs far more than an NN epoch), so this is the fair "who gets further for
+        # equal compute" comparison -- no checkpoint marker here since the shared
+        # checkpoint sits at a different cumulative time per method (different
+        # epoch costs), unlike the epoch-indexed chart where it's one shared x value.
+        time_df = _add_cumulative_time(per_epoch_df)
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_per_epoch_accuracy_ax(ax, time_df, color_map, x_col="cumulative_train_time_s", x_label="Cumulative Training Time (s)")
+        ax.set_title("Accuracy vs. Training Time")
+        _annotate_hyperparams_epoch_left_of_legend(ax, meta)
+        p = os.path.join(run_dir, PLOT_PER_EPOCH_ACCURACY_BY_TIME_PNG)
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        saved.append(PLOT_PER_EPOCH_ACCURACY_BY_TIME_PNG)
 
         fig, ax = plt.subplots(figsize=(9, 6))
         _draw_bar_metric_ax(
@@ -1017,10 +1083,52 @@ def write_result_plots_from_run_dir(run_dir: str) -> None:
         plt.close(fig)
         saved.append(PLOT_TOTAL_TRAIN_TIME_PNG)
 
-        fig, ((ax_curve, ax_time), (ax_bar, ax_train)) = plt.subplots(2, 2, figsize=(14, 10))
+        # Weight-resolution ablation: load + build method_data here (before the
+        # combined figure below, which includes this panel too), then also save it
+        # as its own standalone PNG.
+        method_data = None
+        ablation_json_path = os.path.join(run_dir, WEIGHT_RESOLUTION_ABLATION_FILENAME)
+        if os.path.isfile(ablation_json_path):
+            with open(ablation_json_path, encoding="utf-8") as f:
+                ablation = json.load(f)
+            try:
+                method_data = [
+                    {
+                        "method": m,
+                        "baseline": ablation[f"{BASE_METHOD_OF[m]}_baseline_test_accuracy"],
+                        "continuous": ablation[f"{m}_direct_continuous_test_accuracy"],
+                        "int_rounded": ablation[f"{m}_direct_int_rounded_test_accuracy"],
+                    }
+                    for m in ("WTM-NN", "UTM-NN")
+                ]
+            except KeyError as e:
+                logger.warning(f"Skipping {PLOT_WEIGHT_RESOLUTION_ABLATION_PNG}: ablation JSON at {ablation_json_path} missing key {e} (older schema).")
+                method_data = None
+            else:
+                fig, ax = plt.subplots(figsize=(9, 6))
+                _draw_weight_resolution_ablation_ax(ax, method_data, "Weight-Resolution Ablation")
+                _annotate_hyperparams_bottom_right(ax, meta)
+                p = os.path.join(run_dir, PLOT_WEIGHT_RESOLUTION_ABLATION_PNG)
+                fig.savefig(p, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                saved.append(PLOT_WEIGHT_RESOLUTION_ABLATION_PNG)
+        else:
+            logger.info(f"Skipping {PLOT_WEIGHT_RESOLUTION_ABLATION_PNG}: no {WEIGHT_RESOLUTION_ABLATION_FILENAME} found under {run_dir}.")
+
+        fig, ((ax_curve, ax_curve_time, ax_ablation), (ax_bar, ax_time, ax_train)) = plt.subplots(2, 3, figsize=(21, 10))
         fig.suptitle(f"TM vs TM-NN — {meta['dataset_name']}", fontsize=13, fontweight="bold")
         _draw_per_epoch_accuracy_ax(ax_curve, per_epoch_df, color_map)
+        _annotate_checkpoint(ax_curve, split_one)
         _annotate_hyperparams_epoch_left_of_legend(ax_curve, meta)
+        _draw_per_epoch_accuracy_ax(ax_curve_time, time_df, color_map, x_col="cumulative_train_time_s", x_label="Cumulative Training Time (s)")
+        ax_curve_time.set_title("Accuracy vs. Training Time")
+        _annotate_hyperparams_epoch_left_of_legend(ax_curve_time, meta)
+        if method_data is not None:
+            _draw_weight_resolution_ablation_ax(ax_ablation, method_data, "Weight-Resolution Ablation")
+            _annotate_hyperparams_bottom_right(ax_ablation, meta)
+        else:
+            ax_ablation.text(0.5, 0.5, "No ablation data available", ha="center", va="center", transform=ax_ablation.transAxes)
+            ax_ablation.set_axis_off()
         _draw_bar_metric_ax(
             ax_bar, summary_df, color_map, "avg_last10_tm_accuracy",
             "Avg Last-10 TM Accuracy (%)", "Avg Last-10 TM Accuracy by Method", "{:.1f}%",
@@ -1043,33 +1151,6 @@ def write_result_plots_from_run_dir(run_dir: str) -> None:
         plt.close(fig)
         saved.append(PLOT_COMBINED_PNG)
 
-        ablation_json_path = os.path.join(run_dir, WEIGHT_RESOLUTION_ABLATION_FILENAME)
-        if os.path.isfile(ablation_json_path):
-            with open(ablation_json_path, encoding="utf-8") as f:
-                ablation = json.load(f)
-            try:
-                method_data = [
-                    {
-                        "method": m,
-                        "baseline": ablation[f"{BASE_METHOD_OF[m]}_baseline_test_accuracy"],
-                        "continuous": ablation[f"{m}_direct_continuous_test_accuracy"],
-                        "int_rounded": ablation[f"{m}_direct_int_rounded_test_accuracy"],
-                    }
-                    for m in ("WTM-NN", "UTM-NN")
-                ]
-            except KeyError as e:
-                logger.warning(f"Skipping {PLOT_WEIGHT_RESOLUTION_ABLATION_PNG}: ablation JSON at {ablation_json_path} missing key {e} (older schema).")
-            else:
-                fig, ax = plt.subplots(figsize=(9, 6))
-                _draw_weight_resolution_ablation_ax(ax, method_data, "Weight-Resolution Ablation")
-                _annotate_hyperparams_bottom_right(ax, meta)
-                p = os.path.join(run_dir, PLOT_WEIGHT_RESOLUTION_ABLATION_PNG)
-                fig.savefig(p, dpi=150, bbox_inches="tight")
-                plt.close(fig)
-                saved.append(PLOT_WEIGHT_RESOLUTION_ABLATION_PNG)
-        else:
-            logger.info(f"Skipping {PLOT_WEIGHT_RESOLUTION_ABLATION_PNG}: no {WEIGHT_RESOLUTION_ABLATION_FILENAME} found under {run_dir}.")
-
     logger.info(f"Saved {len(saved)} plots to {run_dir}: {', '.join(saved)}")
 
 
@@ -1087,12 +1168,13 @@ def write_aggregate_plots(
 ) -> None:
     """
     Cross-seed rollup plots for one dataset config, written once after the seed loop
-    (see __main__). Five PNGs into aggregate_dir. Shaded bands / error bars everywhere
+    (see __main__). Six PNGs into aggregate_dir. Shaded bands / error bars everywhere
     show +/-1 across-seed sample std (ddof=1), NOT SEM or a confidence interval --
     consistent with this module's mean +/- std convention throughout.
     """
     meta = {"C": C, "T": T, "s": s}
     n_seeds = len(per_epoch_dfs)
+    split_one = int(agg_df.iloc[0]["total_epochs"] * agg_df.iloc[0]["split_point"])
     saved: list[str] = []
     with plt.rc_context(_SERIF_RCPARAMS):
         color_map = _plot_color_map()
@@ -1101,12 +1183,29 @@ def write_aggregate_plots(
         agg_pe_df = _aggregate_per_epoch(per_epoch_dfs)
         fig, ax = plt.subplots(figsize=(9, 6))
         _draw_per_epoch_accuracy_ax(ax, agg_pe_df, color_map, std_col="test_accuracy_std")
+        _annotate_checkpoint(ax, split_one)
         ax.set_title(f"Per-Epoch Accuracy (mean +/- 1 std, n={n_seeds} seeds)")
         _annotate_hyperparams_epoch_left_of_legend(ax, meta)
         p = os.path.join(aggregate_dir, PLOT_AGGREGATE_PER_EPOCH_ACCURACY_PNG)
         fig.savefig(p, dpi=150, bbox_inches="tight")
         plt.close(fig)
         saved.append(PLOT_AGGREGATE_PER_EPOCH_ACCURACY_PNG)
+
+        # Wall-clock variant (see the per-seed docstring note in
+        # write_result_plots_from_run_dir): no checkpoint marker here, since the
+        # shared checkpoint sits at a different cumulative time per method.
+        agg_time_df = _add_cumulative_time(agg_pe_df)
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_per_epoch_accuracy_ax(
+            ax, agg_time_df, color_map, std_col="test_accuracy_std",
+            x_col="cumulative_train_time_s", x_label="Cumulative Training Time (s)",
+        )
+        ax.set_title(f"Accuracy vs. Training Time (mean +/- 1 std, n={n_seeds} seeds)")
+        _annotate_hyperparams_epoch_left_of_legend(ax, meta)
+        p = os.path.join(aggregate_dir, PLOT_AGGREGATE_PER_EPOCH_ACCURACY_BY_TIME_PNG)
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        saved.append(PLOT_AGGREGATE_PER_EPOCH_ACCURACY_BY_TIME_PNG)
 
         # Aggregate accuracy bar chart, error bars + significance brackets.
         significance_pairs = [
@@ -1332,7 +1431,10 @@ def run_experiment(
     split_one = int(total_epochs * split_point)
     split_two = total_epochs - split_one
 
-    # No _C{C}_T{T}_s{s} suffix needed: run_dir already sits under a config_dir that encodes them.
+    # Transient checkpoints only -- pass the split_one TM state from phase 1/2 into
+    # phase 3/4 within this same run; deleted right after each is loaded, not a
+    # persistent output artifact. No _C{C}_T{T}_s{s} suffix needed: run_dir already
+    # sits under a config_dir that encodes them.
     unweighted_tm_path = os.path.join(run_dir, "unweighted_tm.pkl")
     weighted_tm_path = os.path.join(run_dir, "weighted_tm.pkl")
 
@@ -1377,6 +1479,7 @@ def run_experiment(
     phase_start = perf_counter()
     logger.info(f"[{run_tag}] [3/4] Training WTM-NN (NN phase, {split_two} epochs)")
     frozen_weighted_tm = pkl.load(open(weighted_tm_path, "rb"))
+    os.remove(weighted_tm_path)  # done with the checkpoint file now that it's loaded
     nn_w = LogWeightHead(n_classes=n_classes, n_clauses=frozen_weighted_tm.number_of_clauses,
                          T=None, init_weights=frozen_weighted_tm.get_clause_weights())
     ep = _add("WTM-NN", r_w1, "tm", 1)
@@ -1391,6 +1494,7 @@ def run_experiment(
     phase_start = perf_counter()
     logger.info(f"[{run_tag}] [4/4] Training UTM-NN (NN phase, {split_two} epochs)")
     frozen_unweighted_tm = pkl.load(open(unweighted_tm_path, "rb"))
+    os.remove(unweighted_tm_path)  # done with the checkpoint file now that it's loaded
     nn_u = LogWeightHead(n_classes=n_classes, n_clauses=frozen_unweighted_tm.number_of_clauses, T=None)
     ep = _add("UTM-NN", r_u1, "tm", 1)
     r_nn_u = train_log_weight_head(nn_u, frozen_unweighted_tm, x_train, y_train, x_val, y_val, x_test, y_test, epochs=split_two)

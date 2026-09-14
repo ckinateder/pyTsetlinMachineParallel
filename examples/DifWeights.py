@@ -30,16 +30,25 @@ WHAT CHANGED IN THIS PASS (context if you're picking this back up):
       aggregate_weight_resolution_ablation).
     - Restructured the output directory layout (below) to separate per-seed detail
       from cross-seed rollups.
+    - Plot colors are now a fixed, colorblind-validated 4-hue palette (METHOD_COLORS),
+      not matplotlib's default cycle. Bar charts support error bars and significance
+      brackets. Added a seed-averaged per-epoch accuracy chart (+/-1 std band), a
+      weight-resolution-ablation chart (per-seed and aggregate), and a
+      "{method}_baseline_test_accuracy" field on the ablation JSON/CSV so the
+      continuous/int-rounded numbers can be read against the native TM's own accuracy
+      without cross-referencing summary_results.csv. NOT backward compatible with
+      weight_resolution_ablation.json files from before this field existed.
 
 OUTPUT LAYOUT:
     results/<dataset>_C<C>_T<T>_s<s>_e<total_epochs>/
         seed_0/ ... seed_<n-1>/   per-seed detail: per_epoch_results.csv,
                                   summary_results.csv, experiment_metadata.json,
                                   weight_resolution_ablation.json, two .pkl TM
-                                  checkpoints, five plot_*.png
+                                  checkpoints, six plot_*.png
         aggregate/                cross-seed rollups: aggregate_summary_results.csv,
                                   significance_tests.csv,
-                                  weight_resolution_ablation_aggregate.csv
+                                  weight_resolution_ablation_aggregate.csv,
+                                  five plot_aggregate_*.png
 
 HOW TO RUN:
     Must run inside the project's Docker container -- the C extension needs a Linux +
@@ -60,6 +69,7 @@ HOW TO RUN:
 """
 
 import json
+import logging
 import random
 from datetime import datetime, timezone
 from time import perf_counter
@@ -84,6 +94,12 @@ from scipy import stats
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
+# Console logging: timestamped, one line per phase/status event -- distinct from the
+# plain print() calls used for tabular data dumps (DataFrame.to_string()), which stay
+# untimestamped since a timestamp on a table header doesn't help read the table.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+logger = logging.getLogger("DifWeights")
+
 # Per-epoch training metrics returned by train_tm / train_log_weight_head.
 # Each list element is one epoch, in order. Keys are floats (seconds for times).
 EpochResult = dict[str, float]
@@ -102,6 +118,9 @@ METHODS_PLOT_ORDER = ("WTM-NN", "UTM-NN", "UTM", "WTM")
 # and the same epoch-split_one checkpoint (see run_experiment), so pairing by seed
 # index -- not independently sorted/grouped values -- is the meaningful pairing.
 SIGNIFICANCE_PAIRS: tuple[tuple[str, str], ...] = (("WTM-NN", "WTM"), ("UTM-NN", "UTM"))
+# treatment method -> base method (e.g. "WTM-NN" -> "WTM"), reused wherever a baseline
+# needs to be labeled by the base model's own name rather than the -NN treatment's.
+BASE_METHOD_OF: dict[str, str] = dict(SIGNIFICANCE_PAIRS)
 
 # Base seed; run i uses BASE_SEED + i (see __main__).
 BASE_SEED = 1000
@@ -204,7 +223,7 @@ class LogWeightHead(nn.Module):
         self.T = T
         
         if init_weights is not None and T is not None:
-            print("WARNING: Both init_weights and T are provided - this clamps gradients")
+            logger.warning("LogWeightHead: both init_weights and T are provided - this clamps gradients")
         
         if init_weights is None:
             theta_init = torch.zeros(n_classes, n_clauses)
@@ -278,6 +297,8 @@ def weight_resolution_ablation(
     frozen_tm: MultiClassTsetlinMachine,
     x_test: np.ndarray,
     y_test: np.ndarray,
+    base_method: str,
+    baseline_test_accuracy: float,
 ) -> dict:
     """
     Isolates weight DOMAIN (continuous reals vs. the positive-integer, floor-1
@@ -288,11 +309,19 @@ def weight_resolution_ablation(
     rounding is the only difference between them, so any accuracy gap is
     attributable to weight resolution alone. If int_rounded accuracy holds up close
     to continuous, the method's gain is not merely from higher numeric precision.
+
+    base_method / baseline_test_accuracy: the native TM's own name ("WTM"/"UTM", not
+    the "-NN" treatment name) and avg-last-10 test accuracy (same rule as
+    compute_summary_df) -- gives the continuous/int-rounded numbers something to be
+    read against without cross-referencing summary_results.csv. Keyed by base_method
+    (e.g. "WTM_baseline_test_accuracy") since the baseline IS the base model's own
+    accuracy, not a property of the "-NN" method.
     """
     raw_weights = nn_model.weights.detach().cpu().numpy()
     continuous_acc = evaluate_weights_direct(frozen_tm, raw_weights, x_test, y_test)
     int_rounded_acc = evaluate_weights_direct(frozen_tm, integer_round_weights(raw_weights), x_test, y_test)
     return {
+        f"{base_method}_baseline_test_accuracy": baseline_test_accuracy,
         f"{method}_direct_continuous_test_accuracy": continuous_acc,
         f"{method}_direct_int_rounded_test_accuracy": int_rounded_acc,
         f"{method}_weight_resolution_gap": continuous_acc - int_rounded_acc,
@@ -452,7 +481,7 @@ def aggregate_experiment_results(
     os.makedirs(save_path, exist_ok=True)  # save_path is a per-config "aggregate/" dir, may not exist yet
     out_path = os.path.join(save_path, AGGREGATE_SUMMARY_RESULTS_FILENAME)
     agg_df.to_csv(out_path, index=False)
-    print(f"\nAggregate summary (mean +/- between-seed std over {n} seeds) saved to {out_path}")
+    logger.info(f"Aggregate summary (mean +/- between-seed std over {n} seeds) saved to {out_path}")
     print(agg_df.to_string(index=False))
     return agg_df
 
@@ -541,7 +570,7 @@ def aggregate_significance_tests(
     df = pd.DataFrame(rows)
     out_path = os.path.join(save_path, SIGNIFICANCE_TESTS_FILENAME)
     df.to_csv(out_path, index=False)
-    print(f"\nSignificance tests saved to {out_path}")
+    logger.info(f"Significance tests saved to {out_path}")
     print(df.to_string(index=False))
     return df
 
@@ -573,9 +602,15 @@ def aggregate_weight_resolution_ablation(
     Writes one row per method to {save_path}/weight_resolution_ablation_aggregate.csv with
     columns:
         dataset, total_epochs, T, s, method, n_seeds_total, n_available,
+        baseline_test_accuracy_mean, baseline_test_accuracy_std,
         direct_continuous_test_accuracy_mean, direct_continuous_test_accuracy_std,
         direct_int_rounded_test_accuracy_mean, direct_int_rounded_test_accuracy_std,
         weight_resolution_gap_mean, weight_resolution_gap_std
+
+    NOT backward compatible with weight_resolution_ablation.json files predating the
+    "{base_method}_baseline_test_accuracy" field (raises KeyError) -- delete stale
+    per-seed dirs and rerun rather than mixing old and new ablation JSONs in one
+    aggregate.
     """
     os.makedirs(save_path, exist_ok=True)
     n_total = len(ablations)
@@ -589,12 +624,15 @@ def aggregate_weight_resolution_ablation(
 
     rows = []
     for method in ("WTM-NN", "UTM-NN"):
+        baseline_vals = [a[f"{BASE_METHOD_OF[method]}_baseline_test_accuracy"] for a in available]
         cont_vals = [a[f"{method}_direct_continuous_test_accuracy"] for a in available]
         rounded_vals = [a[f"{method}_direct_int_rounded_test_accuracy"] for a in available]
         gap_vals = [a[f"{method}_weight_resolution_gap"] for a in available]
         rows.append({
             "dataset": dataset_name, "total_epochs": total_epochs, "T": T, "s": s,
             "method": method, "n_seeds_total": n_total, "n_available": len(cont_vals),
+            "baseline_test_accuracy_mean": _mean_or_nan(baseline_vals),
+            "baseline_test_accuracy_std": _std_or_nan(baseline_vals),
             "direct_continuous_test_accuracy_mean": _mean_or_nan(cont_vals),
             "direct_continuous_test_accuracy_std": _std_or_nan(cont_vals),
             "direct_int_rounded_test_accuracy_mean": _mean_or_nan(rounded_vals),
@@ -607,7 +645,7 @@ def aggregate_weight_resolution_ablation(
     out_path = os.path.join(save_path, WEIGHT_RESOLUTION_ABLATION_AGGREGATE_FILENAME)
     df.to_csv(out_path, index=False)
     n_avail = len(available)
-    print(f"\nWeight-resolution ablation aggregate saved to {out_path} ({n_avail}/{n_total} seeds had ablation data)")
+    logger.info(f"Weight-resolution ablation aggregate saved to {out_path} ({n_avail}/{n_total} seeds had ablation data)")
     print(df.to_string(index=False))
     return df
 
@@ -615,12 +653,20 @@ def aggregate_weight_resolution_ablation(
 EXPERIMENT_METADATA_FILENAME = "experiment_metadata.json"
 EXPERIMENT_METADATA_SCHEMA_VERSION = 3
 
-# Five PNGs per run (no results.png): four singles + one 2x2 combined.
+# Six PNGs per seed (no results.png): four singles + one 2x2 combined + one ablation.
 PLOT_PER_EPOCH_ACCURACY_PNG = "plot_per_epoch_accuracy.png"
 PLOT_AVG_LAST10_ACCURACY_PNG = "plot_avg_last10_accuracy.png"
 PLOT_AVG_LAST10_TM_TEST_TIME_PNG = "plot_avg_last10_tm_test_time.png"
 PLOT_TOTAL_TRAIN_TIME_PNG = "plot_total_train_time.png"
 PLOT_COMBINED_PNG = "plot_combined.png"
+PLOT_WEIGHT_RESOLUTION_ABLATION_PNG = "plot_weight_resolution_ablation.png"
+
+# Five PNGs per dataset, written once after the seed loop by write_aggregate_plots.
+PLOT_AGGREGATE_PER_EPOCH_ACCURACY_PNG = "plot_aggregate_per_epoch_accuracy.png"
+PLOT_AGGREGATE_ACCURACY_PNG = "plot_aggregate_accuracy.png"
+PLOT_AGGREGATE_TEST_TIME_PNG = "plot_aggregate_test_time.png"
+PLOT_AGGREGATE_TRAIN_TIME_PNG = "plot_aggregate_train_time.png"
+PLOT_AGGREGATE_WEIGHT_RESOLUTION_PNG = "plot_aggregate_weight_resolution.png"
 
 # Output-tree filename/dirname constants (see run_experiment / __main__ for the layout):
 #   results/<dataset>_C<C>_T<T>_s<s>_e<total_epochs>/seed_<i>/...       per-seed detail
@@ -638,10 +684,29 @@ _SERIF_RCPARAMS = {
     "mathtext.fontset": "dejavuserif",
 }
 
+# Fixed, validated categorical palette -- NOT derived from matplotlib's rcParams cycle.
+# Checked with the dataviz-skill color validator (node scripts/validate_palette.js
+# "#2a78d6,#eb6834,#1baf7a,#eda100" --mode light): PASS on lightness band, chroma
+# floor, CVD separation (worst adjacent dE 9.1), normal-vision floor (worst adjacent
+# dE 22.9). WARN on raw contrast-vs-surface for aqua/yellow is satisfied by the
+# "relief rule" -- every chart here already carries direct bar labels and/or a legend.
+METHOD_COLORS: dict[str, str] = {
+    "WTM-NN": "#2a78d6",  # blue
+    "UTM-NN": "#eb6834",  # orange
+    "UTM":    "#1baf7a",  # aqua
+    "WTM":    "#eda100",  # yellow
+}
+
+# Weight-resolution-ablation chart colors: "baseline" is a neutral reference point
+# (gray), "continuous" vs "int-rounded" is ordinal (same NN result, full precision vs
+# quantized) so it's one hue in two lightness steps, not two unrelated categorical hues.
+ABLATION_BASELINE_COLOR = "#999999"
+ABLATION_CONTINUOUS_COLOR = "#4a3aa7"  # hue slot 7 (violet); int-rounded reuses this at:
+ABLATION_INT_ROUNDED_ALPHA = 0.5       # ...half alpha, same hex, edgecolor kept solid.
+
 
 def _plot_color_map() -> dict[str, str]:
-    prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    return {m: prop_cycle[i % len(prop_cycle)] for i, m in enumerate(METHODS_PLOT_ORDER)}
+    return dict(METHOD_COLORS)
 
 
 def _hparam_legend_matching_bbox() -> dict:
@@ -679,7 +744,16 @@ def _annotate_hyperparams_epoch_left_of_legend(ax, meta: dict) -> None:
     )
 
 
-def _draw_per_epoch_accuracy_ax(ax, per_epoch_df: pd.DataFrame, color_map: dict[str, str]) -> None:
+def _draw_per_epoch_accuracy_ax(
+    ax, per_epoch_df: pd.DataFrame, color_map: dict[str, str], *, std_col: str | None = None,
+) -> None:
+    """
+    std_col, when given, shades a +/-1 sample-std band (not SEM, not a CI -- matches
+    this module's mean +/- std convention everywhere else) around each segment's line,
+    using a column already present on per_epoch_df (see _aggregate_per_epoch). No band
+    is drawn on the trailing dotted flat-continuation below, since that segment is an
+    extrapolated placeholder, not real per-epoch data.
+    """
     max_epoch = per_epoch_df["epoch"].max()
     for method in METHODS_PLOT_ORDER:
         color = color_map[method]
@@ -695,10 +769,16 @@ def _draw_per_epoch_accuracy_ax(ax, per_epoch_df: pd.DataFrame, color_map: dict[
                 prev = train_df[train_df["segment"] == seg_id - 1].iloc[-1]
                 epochs = [prev["epoch"]] + list(seg["epoch"])
                 accs = [prev["test_accuracy"]] + list(seg["test_accuracy"])
+                stds = [prev[std_col]] + list(seg[std_col]) if std_col is not None else None
             else:
                 epochs = list(seg["epoch"])
                 accs = list(seg["test_accuracy"])
+                stds = list(seg[std_col]) if std_col is not None else None
             ax.plot(epochs, accs, color=color, linestyle=ls, linewidth=1.5, label=method if first else "_nolegend_")
+            if stds is not None:
+                lo = [a - s for a, s in zip(accs, stds)]
+                hi = [a + s for a, s in zip(accs, stds)]
+                ax.fill_between(epochs, lo, hi, color=color, alpha=0.15, linewidth=0)
             first = False
         last = train_df.iloc[-1]
         if last["epoch"] < max_epoch:
@@ -718,6 +798,28 @@ def _draw_per_epoch_accuracy_ax(ax, per_epoch_df: pd.DataFrame, color_map: dict[
     ax.legend(handles=method_handles + style_handles, fontsize=8, loc="lower right")
 
 
+def _significance_stars(p: float) -> str:
+    """*** p<0.001, ** p<0.01, * p<0.05, else "ns" (also "ns" for NaN, which
+    aggregate_significance_tests legitimately produces for n_pairs < 2)."""
+    if not np.isfinite(p):
+        return "ns"
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return "ns"
+
+
+def _draw_significance_bracket(ax, x1: float, x2: float, y: float, label: str) -> None:
+    """Publication-style bracket: horizontal line spanning x1..x2 at height y, short
+    vertical tick-downs at each end, label centered above."""
+    tick = (ax.get_ylim()[1] - ax.get_ylim()[0]) * 0.015
+    ax.plot([x1, x1, x2, x2], [y - tick, y, y, y - tick], color="black", linewidth=1.0)
+    ax.text((x1 + x2) / 2, y, label, ha="center", va="bottom", fontsize=9)
+
+
 def _draw_bar_metric_ax(
     ax,
     summary_df: pd.DataFrame,
@@ -728,11 +830,26 @@ def _draw_bar_metric_ax(
     fmt: str,
     *,
     expand_acc_ylim: bool = False,
+    yerr_col: str | None = None,
+    significance_pairs: list[tuple[str, str, float]] | None = None,
 ) -> None:
+    """
+    yerr_col, when given, draws +/-1 sample-std error bars (a muted neutral color, not
+    a series hue -- an error bar is a statistical annotation, not more data identity).
+    significance_pairs, when given, draws a publication-style bracket + stars above
+    each (method_a, method_b, pvalue) pair, stacked so multiple brackets don't collide.
+    Both are no-ops when omitted -- every pre-existing (single-seed, untested) call
+    site is unaffected.
+    """
     labels = summary_df["method"].tolist()
     bar_colors = [color_map[m] for m in labels]
     values = summary_df[value_col].tolist()
-    bars = ax.bar(range(len(labels)), values, color=bar_colors)
+    yerr = summary_df[yerr_col].tolist() if yerr_col is not None else None
+    bars = ax.bar(
+        range(len(labels)), values, color=bar_colors,
+        yerr=yerr, capsize=4 if yerr is not None else 0,
+        error_kw=({"ecolor": "#444444", "elinewidth": 1.2, "capthick": 1.2} if yerr is not None else None),
+    )
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
     ax.set_ylabel(ylabel)
@@ -744,11 +861,99 @@ def _draw_bar_metric_ax(
     if expand_acc_ylim:
         lo, hi = min(values), max(values)
         ax.set_ylim(lo - (hi - lo) * 0.5, hi + (hi - lo) * 0.2)
+    if significance_pairs:
+        tops = {lab: v + e for lab, v, e in zip(labels, values, yerr or [0.0] * len(values))}
+        span = (max(values) - min(values)) or 1.0
+        y_cursor = max(tops.values())
+        for method_a, method_b, pvalue in significance_pairs:
+            if method_a not in labels or method_b not in labels:
+                continue
+            x1, x2 = labels.index(method_a), labels.index(method_b)
+            y_cursor += span * 0.08
+            _draw_significance_bracket(ax, x1, x2, y_cursor, _significance_stars(pvalue))
+        ax.set_ylim(top=y_cursor + span * 0.12)
+
+
+def _aggregate_per_epoch(per_epoch_dfs: list[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Seed-averaged per-epoch accuracy: concatenates per-seed per_epoch_df frames and
+    groups by (method, epoch). test_accuracy is the across-seed mean (reusing that
+    exact column name so _draw_per_epoch_accuracy_ax's segment-detection logic works
+    unchanged); test_accuracy_std is the across-seed sample std (ddof=1, pandas
+    default -- consistent with this module's mean +/- std convention, NOT SEM or a
+    CI), filled to 0.0 for the n=1-seed edge case (pandas .std() on one value is NaN;
+    the module's own _std helper already treats <2 values as 0.0, matched here).
+    model_type is taken via .first() per group, assuming it's consistent across seeds
+    for the same (method, epoch) -- true here since every seed in one aggregate shares
+    total_epochs / split_point / hyperparameters.
+    """
+    combined = pd.concat(per_epoch_dfs, ignore_index=True)
+    grouped = combined.groupby(["method", "epoch"], as_index=False).agg(
+        test_accuracy=("test_accuracy", "mean"),
+        test_accuracy_std=("test_accuracy", "std"),
+        model_type=("model_type", "first"),
+    )
+    grouped["test_accuracy_std"] = grouped["test_accuracy_std"].fillna(0.0)
+    return grouped
+
+
+def _draw_weight_resolution_ablation_ax(ax, method_data: list[dict], title: str) -> None:
+    """
+    Grouped bar chart: one x-axis cluster per method, 3 bars each (baseline / continuous
+    / int-rounded). Colored as an ordinal one-hue pair (continuous vs int-rounded, same
+    hue at full vs half alpha) plus a neutral gray baseline reference -- not 3 unrelated
+    categorical hues (see ABLATION_* constants). method_data: one dict per method, keys
+    "method", "baseline", "continuous", "int_rounded", and optional "baseline_err" /
+    "continuous_err" / "int_rounded_err" (None or absent -> no error bar for that bar,
+    used for the per-seed chart where n=1 has no variance to show).
+    """
+    n = len(method_data)
+    width = 0.25
+    x = np.arange(n)
+    fields = [
+        ("baseline", "Baseline (native TM)", {"color": ABLATION_BASELINE_COLOR}),
+        ("continuous", "Continuous (unrounded)", {"color": ABLATION_CONTINUOUS_COLOR}),
+        ("int_rounded", "Int-rounded", {
+            "color": ABLATION_CONTINUOUS_COLOR, "alpha": ABLATION_INT_ROUNDED_ALPHA,
+            "edgecolor": ABLATION_CONTINUOUS_COLOR, "linewidth": 1.0,
+        }),
+    ]
+    for i, (key, legend_label, style) in enumerate(fields):
+        vals = [d[key] for d in method_data]
+        errs = [d.get(f"{key}_err") for d in method_data]
+        has_err = any(e is not None for e in errs)
+        yerr = [e if e is not None else 0.0 for e in errs] if has_err else None
+        offset = (i - 1) * width
+        bars = ax.bar(
+            x + offset, vals, width, label=legend_label, yerr=yerr,
+            capsize=4 if has_err else 0,
+            error_kw=({"ecolor": "#444444", "elinewidth": 1.0, "capthick": 1.0} if has_err else None),
+            **style,
+        )
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{v:.1f}%", ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(x)
+    ax.set_xticklabels([d["method"] for d in method_data])
+    ax.set_ylabel("Test Accuracy (%)")
+    ax.set_title(title)
+    ax.set_axisbelow(True)
+    ax.grid(True, alpha=0.3, axis="y")
+    # Legend at upper-right, with headroom added above the tallest bar+label so it
+    # doesn't collide with the hyperparameter annotation box (bottom-right, see callers).
+    ax.legend(fontsize=8, loc="upper right")
+    # Truncate the bottom instead of starting at 0: baseline/continuous/int-rounded
+    # all sit in a narrow band (e.g. 75-90%), and a 0-100 axis flattens exactly the
+    # differences this chart exists to show. Same lo-span*0.5 / hi+span*k truncation
+    # rule as _draw_bar_metric_ax's expand_acc_ylim, with extra top room for the legend.
+    all_vals = [d[key] for d in method_data for key in ("baseline", "continuous", "int_rounded")]
+    lo, hi = min(all_vals), max(all_vals)
+    span = (hi - lo) or 1.0
+    ax.set_ylim(lo - span * 0.5, hi + span * 0.6)
 
 
 def write_result_plots_from_run_dir(run_dir: str) -> None:
     """
-    Read per_epoch_results.csv + experiment_metadata.json; compute summary in memory; write five PNGs.
+    Read per_epoch_results.csv + experiment_metadata.json; compute summary in memory; write six PNGs.
 
     Raises:
         FileNotFoundError: if metadata or per-epoch CSV is missing.
@@ -765,6 +970,7 @@ def write_result_plots_from_run_dir(run_dir: str) -> None:
         meta = json.load(f)
     per_epoch_df = pd.read_csv(per_epoch_path)
     summary_df = compute_summary_df(per_epoch_df)
+    saved: list[str] = []
 
     with plt.rc_context(_SERIF_RCPARAMS):
         color_map = _plot_color_map()
@@ -775,7 +981,7 @@ def write_result_plots_from_run_dir(run_dir: str) -> None:
         p = os.path.join(run_dir, PLOT_PER_EPOCH_ACCURACY_PNG)
         fig.savefig(p, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"Saved plot to {p}")
+        saved.append(PLOT_PER_EPOCH_ACCURACY_PNG)
 
         fig, ax = plt.subplots(figsize=(9, 6))
         _draw_bar_metric_ax(
@@ -787,7 +993,7 @@ def write_result_plots_from_run_dir(run_dir: str) -> None:
         p = os.path.join(run_dir, PLOT_AVG_LAST10_ACCURACY_PNG)
         fig.savefig(p, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"Saved plot to {p}")
+        saved.append(PLOT_AVG_LAST10_ACCURACY_PNG)
 
         fig, ax = plt.subplots(figsize=(9, 6))
         _draw_bar_metric_ax(
@@ -798,7 +1004,7 @@ def write_result_plots_from_run_dir(run_dir: str) -> None:
         p = os.path.join(run_dir, PLOT_AVG_LAST10_TM_TEST_TIME_PNG)
         fig.savefig(p, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"Saved plot to {p}")
+        saved.append(PLOT_AVG_LAST10_TM_TEST_TIME_PNG)
 
         fig, ax = plt.subplots(figsize=(9, 6))
         _draw_bar_metric_ax(
@@ -809,7 +1015,7 @@ def write_result_plots_from_run_dir(run_dir: str) -> None:
         p = os.path.join(run_dir, PLOT_TOTAL_TRAIN_TIME_PNG)
         fig.savefig(p, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"Saved plot to {p}")
+        saved.append(PLOT_TOTAL_TRAIN_TIME_PNG)
 
         fig, ((ax_curve, ax_time), (ax_bar, ax_train)) = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle(f"TM vs TM-NN — {meta['dataset_name']}", fontsize=13, fontweight="bold")
@@ -835,7 +1041,141 @@ def write_result_plots_from_run_dir(run_dir: str) -> None:
         p = os.path.join(run_dir, PLOT_COMBINED_PNG)
         fig.savefig(p, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"Saved plot to {p}")
+        saved.append(PLOT_COMBINED_PNG)
+
+        ablation_json_path = os.path.join(run_dir, WEIGHT_RESOLUTION_ABLATION_FILENAME)
+        if os.path.isfile(ablation_json_path):
+            with open(ablation_json_path, encoding="utf-8") as f:
+                ablation = json.load(f)
+            try:
+                method_data = [
+                    {
+                        "method": m,
+                        "baseline": ablation[f"{BASE_METHOD_OF[m]}_baseline_test_accuracy"],
+                        "continuous": ablation[f"{m}_direct_continuous_test_accuracy"],
+                        "int_rounded": ablation[f"{m}_direct_int_rounded_test_accuracy"],
+                    }
+                    for m in ("WTM-NN", "UTM-NN")
+                ]
+            except KeyError as e:
+                logger.warning(f"Skipping {PLOT_WEIGHT_RESOLUTION_ABLATION_PNG}: ablation JSON at {ablation_json_path} missing key {e} (older schema).")
+            else:
+                fig, ax = plt.subplots(figsize=(9, 6))
+                _draw_weight_resolution_ablation_ax(ax, method_data, "Weight-Resolution Ablation")
+                _annotate_hyperparams_bottom_right(ax, meta)
+                p = os.path.join(run_dir, PLOT_WEIGHT_RESOLUTION_ABLATION_PNG)
+                fig.savefig(p, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+                saved.append(PLOT_WEIGHT_RESOLUTION_ABLATION_PNG)
+        else:
+            logger.info(f"Skipping {PLOT_WEIGHT_RESOLUTION_ABLATION_PNG}: no {WEIGHT_RESOLUTION_ABLATION_FILENAME} found under {run_dir}.")
+
+    logger.info(f"Saved {len(saved)} plots to {run_dir}: {', '.join(saved)}")
+
+
+def write_aggregate_plots(
+    aggregate_dir: str,
+    per_epoch_dfs: list[pd.DataFrame],
+    agg_df: pd.DataFrame,
+    sig_df: pd.DataFrame,
+    ablation_agg_df: pd.DataFrame,
+    *,
+    dataset_name: str,
+    C: int,
+    T: int,
+    s: float,
+) -> None:
+    """
+    Cross-seed rollup plots for one dataset config, written once after the seed loop
+    (see __main__). Five PNGs into aggregate_dir. Shaded bands / error bars everywhere
+    show +/-1 across-seed sample std (ddof=1), NOT SEM or a confidence interval --
+    consistent with this module's mean +/- std convention throughout.
+    """
+    meta = {"C": C, "T": T, "s": s}
+    n_seeds = len(per_epoch_dfs)
+    saved: list[str] = []
+    with plt.rc_context(_SERIF_RCPARAMS):
+        color_map = _plot_color_map()
+
+        # Seed-averaged per-epoch accuracy with +/-1 std band.
+        agg_pe_df = _aggregate_per_epoch(per_epoch_dfs)
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_per_epoch_accuracy_ax(ax, agg_pe_df, color_map, std_col="test_accuracy_std")
+        ax.set_title(f"Per-Epoch Accuracy (mean +/- 1 std, n={n_seeds} seeds)")
+        _annotate_hyperparams_epoch_left_of_legend(ax, meta)
+        p = os.path.join(aggregate_dir, PLOT_AGGREGATE_PER_EPOCH_ACCURACY_PNG)
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        saved.append(PLOT_AGGREGATE_PER_EPOCH_ACCURACY_PNG)
+
+        # Aggregate accuracy bar chart, error bars + significance brackets.
+        significance_pairs = [
+            (row["treatment_method"], row["base_method"], row["ttest_pvalue"])
+            for _, row in sig_df.iterrows()
+        ]
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_bar_metric_ax(
+            ax, agg_df, color_map, "avg_last10_tm_accuracy_mean",
+            "Avg Last-10 TM Accuracy (%)", f"Avg Last-10 TM Accuracy by Method (n={n_seeds} seeds)", "{:.1f}%",
+            expand_acc_ylim=True, yerr_col="avg_last10_tm_accuracy_std", significance_pairs=significance_pairs,
+        )
+        _annotate_hyperparams_bottom_right(ax, meta)
+        p = os.path.join(aggregate_dir, PLOT_AGGREGATE_ACCURACY_PNG)
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        saved.append(PLOT_AGGREGATE_ACCURACY_PNG)
+
+        # Aggregate inference-time and total-train-time, error bars, no brackets
+        # (not statistically tested).
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_bar_metric_ax(
+            ax, agg_df, color_map, "avg_last10_tm_test_time_s_mean",
+            "Inference Time (s)", "Avg Last-10 TM Inference Time (aggregate)", "{:.3f}s",
+            yerr_col="avg_last10_tm_test_time_s_std",
+        )
+        _annotate_hyperparams_bottom_right(ax, meta)
+        p = os.path.join(aggregate_dir, PLOT_AGGREGATE_TEST_TIME_PNG)
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        saved.append(PLOT_AGGREGATE_TEST_TIME_PNG)
+
+        fig, ax = plt.subplots(figsize=(9, 6))
+        _draw_bar_metric_ax(
+            ax, agg_df, color_map, "total_train_time_s_mean",
+            "Training Time (s)", "Total Training Time by Method (aggregate)", "{:.1f}s",
+            yerr_col="total_train_time_s_std",
+        )
+        _annotate_hyperparams_bottom_right(ax, meta)
+        p = os.path.join(aggregate_dir, PLOT_AGGREGATE_TRAIN_TIME_PNG)
+        fig.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        saved.append(PLOT_AGGREGATE_TRAIN_TIME_PNG)
+
+        # Aggregate weight-resolution ablation.
+        method_data = []
+        for m in ("WTM-NN", "UTM-NN"):
+            matches = ablation_agg_df[ablation_agg_df["method"] == m]
+            if matches.empty:
+                continue
+            row = matches.iloc[0]
+            method_data.append({
+                "method": m,
+                "baseline": row["baseline_test_accuracy_mean"], "baseline_err": row["baseline_test_accuracy_std"],
+                "continuous": row["direct_continuous_test_accuracy_mean"], "continuous_err": row["direct_continuous_test_accuracy_std"],
+                "int_rounded": row["direct_int_rounded_test_accuracy_mean"], "int_rounded_err": row["direct_int_rounded_test_accuracy_std"],
+            })
+        if method_data:
+            fig, ax = plt.subplots(figsize=(9, 6))
+            _draw_weight_resolution_ablation_ax(ax, method_data, "Weight-Resolution Ablation (aggregate)")
+            _annotate_hyperparams_bottom_right(ax, meta)
+            p = os.path.join(aggregate_dir, PLOT_AGGREGATE_WEIGHT_RESOLUTION_PNG)
+            fig.savefig(p, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            saved.append(PLOT_AGGREGATE_WEIGHT_RESOLUTION_PNG)
+        else:
+            logger.info(f"Skipping {PLOT_AGGREGATE_WEIGHT_RESOLUTION_PNG}: no ablation rows available (0 seeds had ablation data).")
+
+    logger.info(f"Saved {len(saved)} aggregate plots to {aggregate_dir}: {', '.join(saved)}")
 
 
 def replot_from_run_dir(run_dir: str) -> None:
@@ -954,8 +1294,11 @@ def run_experiment(
     summary_csv = os.path.join(run_dir, "summary_results.csv")
     metadata_json = os.path.join(run_dir, EXPERIMENT_METADATA_FILENAME)
 
+    run_tag = f"{dataset_name} {SEED_DIR_PREFIX}{seed_index}"
+    run_start = perf_counter()
+
     if os.path.isfile(per_epoch_csv) and os.path.isfile(summary_csv):
-        print(f"Run directory {run_dir} already exists and CSV results are present. Skipping training...")
+        logger.info(f"[{run_tag}] cached run found at {run_dir} -- skipping training, replotting only")
         if not os.path.isfile(metadata_json):
             raise FileNotFoundError(
                 f"Missing {EXPERIMENT_METADATA_FILENAME!r} under {run_dir!r}; required to regenerate plots. "
@@ -973,6 +1316,7 @@ def run_experiment(
         return per_epoch_df, summary_df, ablation
 
     os.makedirs(run_dir, exist_ok=True)
+    logger.info(f"[{run_tag}] starting: C={C} T={T} s={s} total_epochs={total_epochs} split_point={split_point}")
 
     # Shuffle once per run, then hold out a validation split from the training set.
     # The shuffle also gives each seed a distinct example order into the TM (the C
@@ -1006,24 +1350,32 @@ def run_experiment(
             })
         return start_epoch + len(epoch_results)
 
+    def _tail10(epoch_results: list[EpochResult]) -> float:
+        return float(np.mean([r["test_accuracy"] for r in epoch_results[-10:]]))
+
     # 1. UTM
-    print(f"[1/4] Training UTM for {total_epochs} epochs")
+    phase_start = perf_counter()
+    logger.info(f"[{run_tag}] [1/4] Training UTM for {total_epochs} epochs")
     unweighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=False)
     r_u1 = train_tm(unweighted_tm, x_train, y_train, x_test, y_test, epochs=split_one)
     pkl.dump(unweighted_tm, open(unweighted_tm_path, "wb"))
     r_u2 = train_tm(unweighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
     _add("UTM", r_u1 + r_u2, "tm", 1)
+    logger.info(f"[{run_tag}] [1/4] UTM done in {perf_counter() - phase_start:.1f}s (avg-last10 acc {_tail10(r_u1 + r_u2):.2f}%)")
 
     # 2. WTM
-    print(f"[2/4] Training WTM for {total_epochs} epochs")
+    phase_start = perf_counter()
+    logger.info(f"[{run_tag}] [2/4] Training WTM for {total_epochs} epochs")
     weighted_tm = MultiClassTsetlinMachine(C, T, s, number_of_state_bits=number_of_state_bits, weighted_clauses=True)
     r_w1 = train_tm(weighted_tm, x_train, y_train, x_test, y_test, epochs=split_one)
     pkl.dump(weighted_tm, open(weighted_tm_path, "wb"))
     r_w2 = train_tm(weighted_tm, x_train, y_train, x_test, y_test, epochs=split_two)
     _add("WTM", r_w1 + r_w2, "tm", 1)
+    logger.info(f"[{run_tag}] [2/4] WTM done in {perf_counter() - phase_start:.1f}s (avg-last10 acc {_tail10(r_w1 + r_w2):.2f}%)")
 
     # 3. WTM-NN: reuse r_w1 as the TM phase (same checkpoint), then train NN
-    print(f"[3/4] Training WTM-NN (NN phase, {split_two} epochs)")
+    phase_start = perf_counter()
+    logger.info(f"[{run_tag}] [3/4] Training WTM-NN (NN phase, {split_two} epochs)")
     frozen_weighted_tm = pkl.load(open(weighted_tm_path, "rb"))
     nn_w = LogWeightHead(n_classes=n_classes, n_clauses=frozen_weighted_tm.number_of_clauses,
                          T=None, init_weights=frozen_weighted_tm.get_clause_weights())
@@ -1033,9 +1385,11 @@ def run_experiment(
     Z_val_w = frozen_weighted_tm.transform(x_val, inverted=False).astype("uint8")
     scaled_weights = scale_weights_for_tm(nn_w, Z_val_w, frozen_weighted_tm.T)
     frozen_weighted_tm.set_clause_weights(scaled_weights)
+    logger.info(f"[{run_tag}] [3/4] WTM-NN done in {perf_counter() - phase_start:.1f}s (avg-last10 acc {_tail10(r_nn_w):.2f}%)")
 
     # 4. UTM-NN: reuse r_u1 as the TM phase, then train NN
-    print(f"[4/4] Training UTM-NN (NN phase, {split_two} epochs)")
+    phase_start = perf_counter()
+    logger.info(f"[{run_tag}] [4/4] Training UTM-NN (NN phase, {split_two} epochs)")
     frozen_unweighted_tm = pkl.load(open(unweighted_tm_path, "rb"))
     nn_u = LogWeightHead(n_classes=n_classes, n_clauses=frozen_unweighted_tm.number_of_clauses, T=None)
     ep = _add("UTM-NN", r_u1, "tm", 1)
@@ -1044,6 +1398,7 @@ def run_experiment(
     Z_val_u = frozen_unweighted_tm.transform(x_val, inverted=False).astype("uint8")
     scaled_weights = scale_weights_for_tm(nn_u, Z_val_u, frozen_unweighted_tm.T)
     frozen_unweighted_tm.set_clause_weights(scaled_weights)
+    logger.info(f"[{run_tag}] [4/4] UTM-NN done in {perf_counter() - phase_start:.1f}s (avg-last10 acc {_tail10(r_nn_u):.2f}%)")
 
     # Weight-resolution ablation: does the WTM-NN / UTM-NN gain survive collapsing
     # their gradient-fit real-valued weights onto the positive-integer, floor-1
@@ -1051,15 +1406,19 @@ def run_experiment(
     # retraining) diagnostic for the continuous-vs-integer confound; not run on a
     # cache-hit skip since nn_w/nn_u aren't reconstructable from the cached CSVs.
     native_weights = weighted_tm.get_clause_weights()
+    # per_epoch_df isn't built yet (see below) -- r_w1+r_w2 / r_u1+r_u2 are the same
+    # raw epoch-result lists, in scope, matching compute_summary_df's tail-10 rule.
+    wtm_baseline_acc = float(np.mean([r["test_accuracy"] for r in (r_w1 + r_w2)[-10:]]))
+    utm_baseline_acc = float(np.mean([r["test_accuracy"] for r in (r_u1 + r_u2)[-10:]]))
     ablation = {
         "native_WTM_weight_min": float(native_weights.min()),
         "native_WTM_weight_max": float(native_weights.max()),
     }
-    ablation.update(weight_resolution_ablation("WTM-NN", nn_w, frozen_weighted_tm, x_test, y_test))
-    ablation.update(weight_resolution_ablation("UTM-NN", nn_u, frozen_unweighted_tm, x_test, y_test))
+    ablation.update(weight_resolution_ablation("WTM-NN", nn_w, frozen_weighted_tm, x_test, y_test, "WTM", wtm_baseline_acc))
+    ablation.update(weight_resolution_ablation("UTM-NN", nn_u, frozen_unweighted_tm, x_test, y_test, "UTM", utm_baseline_acc))
     with open(os.path.join(run_dir, WEIGHT_RESOLUTION_ABLATION_FILENAME), "w", encoding="utf-8") as f:
         json.dump(ablation, f, indent=2)
-    print("\nWeight-resolution ablation (no clamp-avoidance rescale; rounding is the only difference within each pair):")
+    logger.info(f"[{run_tag}] Weight-resolution ablation (no clamp-avoidance rescale; rounding is the only difference within each pair):")
     for k, v in ablation.items():
         print(f"  {k}: {v}")
 
@@ -1078,7 +1437,8 @@ def run_experiment(
 
     per_epoch_df.to_csv(os.path.join(run_dir, "per_epoch_results.csv"), index=False)
     summary_df.to_csv(os.path.join(run_dir, "summary_results.csv"), index=False)
-    print("\n" + summary_df.to_string(index=False))
+    logger.info(f"[{run_tag}] training complete in {perf_counter() - run_start:.1f}s")
+    print(summary_df.to_string(index=False))
 
     write_experiment_metadata(
         run_dir,
@@ -1169,9 +1529,14 @@ if __name__ == "__main__":
         (EMNISTDataset, 300, 5),
     ]
 
-    for dataset, C, seeds in pairs:
+    sweep_start = perf_counter()
+    logger.info(f"Sweep starting: {len(pairs)} datasets, {sum(p[2] for p in pairs)} total runs")
+
+    for dataset_idx, (dataset, C, seeds) in enumerate(pairs, 1):
         T = C // 4
         s = 4.0
+        dataset_start = perf_counter()
+        logger.info(f"=== Dataset {dataset_idx}/{len(pairs)}: {dataset.name} (C={C}, T={T}, s={s}, {seeds} seeds) ===")
 
         per_epoch_dfs = []
         summary_dfs = []
@@ -1179,7 +1544,7 @@ if __name__ == "__main__":
 
         for i in range(seeds):
             seed_everything(BASE_SEED + i)
-            print(f"Running experiment for {dataset.name} with C={C}, T={T}, s={s}, seed {i+1} of {seeds} (seed={BASE_SEED + i})")
+            logger.info(f"[{dataset.name} seed_{i}] seed {i+1}/{seeds} (rng seed={BASE_SEED + i})")
             config = ExperimentConfig(
                 C=C, T=T, s=s,
                 number_of_state_bits=number_of_state_bits,
@@ -1201,7 +1566,7 @@ if __name__ == "__main__":
         aggregate_dir = os.path.join(config_dir, AGGREGATE_DIRNAME)
         os.makedirs(aggregate_dir, exist_ok=True)
 
-        aggregate_experiment_results(
+        agg_df = aggregate_experiment_results(
             dataset_name=dataset.name,
             per_epoch_dfs=per_epoch_dfs,
             summary_dfs=summary_dfs,
@@ -1212,7 +1577,7 @@ if __name__ == "__main__":
             split_point=split_point,
             val_fraction=val_fraction,
         )
-        aggregate_significance_tests(
+        sig_df = aggregate_significance_tests(
             dataset_name=dataset.name,
             per_epoch_dfs=per_epoch_dfs,
             save_path=aggregate_dir,
@@ -1220,7 +1585,7 @@ if __name__ == "__main__":
             T=T,
             s=s,
         )
-        aggregate_weight_resolution_ablation(
+        ablation_agg_df = aggregate_weight_resolution_ablation(
             dataset_name=dataset.name,
             ablations=ablations,
             save_path=aggregate_dir,
@@ -1228,3 +1593,10 @@ if __name__ == "__main__":
             T=T,
             s=s,
         )
+        write_aggregate_plots(
+            aggregate_dir, per_epoch_dfs, agg_df, sig_df, ablation_agg_df,
+            dataset_name=dataset.name, C=C, T=T, s=s,
+        )
+        logger.info(f"=== Dataset {dataset_idx}/{len(pairs)}: {dataset.name} complete in {(perf_counter() - dataset_start) / 60:.1f} min -> {aggregate_dir} ===")
+
+    logger.info(f"Sweep complete: {len(pairs)} datasets in {(perf_counter() - sweep_start) / 60:.1f} min")

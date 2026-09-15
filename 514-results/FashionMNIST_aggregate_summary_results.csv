@@ -1,6 +1,0 @@
-dataset,total_epochs,T,s,split_point,method,n_seeds,n_pooled_accuracy_epochs,avg_last10_tm_accuracy_mean,avg_last10_tm_accuracy_std,avg_tm_epoch_time_s_mean,avg_tm_epoch_time_s_std,inference_time_s_mean,inference_time_s_std,total_train_time_s_mean,total_train_time_s_std
-FashionMNIST,500,25,4.0,0.3,UTM,5,50,80.8072,0.1889,0.4711,0.0023,0.0643,0.0006,235.54,1.14
-FashionMNIST,500,25,4.0,0.3,WTM,5,50,81.4654,0.5841,0.3089,0.0003,0.0675,0.001,154.46,0.14
-FashionMNIST,500,25,4.0,0.3,WTM-NN,5,50,84.6932,0.3073,0.3147,0.0006,0.0673,0.0008,123.95,0.34
-FashionMNIST,500,25,4.0,0.3,UTM-NN,5,50,82.4958,0.128,0.4633,0.002,0.064,0.0003,145.59,0.59
-FashionMNIST,500,25,4.0,0.3,Cyclic,5,50,84.2632,0.563,0.3108,0.0008,0.0672,0.0006,124.34,5.99

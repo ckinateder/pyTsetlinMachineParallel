@@ -15,35 +15,118 @@ significance tests between each "-NN" method and its base TM, and a weight-resol
 ablation (does the -NN gain survive collapsing its real-valued weights onto the
 positive-integer domain native training is restricted to?).
 
-WHAT CHANGED IN THIS PASS (context if you're picking this back up):
-    - Held-out validation split: weight-scaling calibration and NN model selection use
-      x_val, never x_test (previously leaked through the test set).
-    - Real per-run seeding (seed_everything) plus a per-run shuffled example order,
-      since the C extension's own RNGs have no seed hook (see seed_everything's
-      docstring) -- this is what gives the n_seeds runs genuine cross-seed variance.
-    - Between-seed std in the aggregate CSV is computed correctly (one scalar per
-      seed, then std across seeds), not pooled per-epoch values across seeds.
-    - The "Cyclic" (TM<->NN alternating) method was removed entirely; see git history
-      from before this pass if it needs to come back.
-    - Added paired significance testing (aggregate_significance_tests: scipy paired
-      t-test + Wilcoxon) and a weight-resolution ablation (weight_resolution_ablation /
-      aggregate_weight_resolution_ablation).
-    - Restructured the output directory layout (below) to separate per-seed detail
-      from cross-seed rollups.
-    - Plot colors are now a fixed, colorblind-validated 4-hue palette (METHOD_COLORS),
-      not matplotlib's default cycle. Bar charts support error bars and significance
-      brackets. Added a seed-averaged per-epoch accuracy chart (+/-1 std band), a
-      weight-resolution-ablation chart (per-seed and aggregate), and a
-      "{base_method}_baseline_test_accuracy" field on the ablation JSON/CSV so the
-      continuous/int-rounded numbers can be read against the native TM's own accuracy
-      without cross-referencing summary_results.csv. NOT backward compatible with
-      weight_resolution_ablation.json files from before this field existed.
-    - Added a wall-clock ("Accuracy vs. Training Time") variant of the per-epoch chart
-      (per-seed and aggregate) -- an epoch is not a fixed unit of compute, so this is
-      the fair "who gets further for equal compute" comparison the epoch-indexed
-      chart can't give. Also added a "Shared checkpoint" marker on the epoch-indexed
-      charts at split_one: WTM-NN/UTM-NN's TM phase literally reuses WTM's/UTM's own
-      first-phase results, so the lines are identical data before that point.
+METHODOLOGY (draft starting point for the paper's Methods section -- verify every
+number against your actual final run before submission; this describes what the code
+does as of this pass, not a fixed protocol):
+
+    Datasets. MNIST, FashionMNIST, KMNIST, EMNIST (letters split, 26 classes), via
+    torchvision. Each image is binarized with a single fixed pixel-intensity threshold
+    (THRESHOLD = 75, applied identically to every dataset -- not tuned per dataset)
+    and flattened to a boolean feature vector. Labels are shifted to be 0-indexed
+    (y - min(y)); this matters for EMNIST-letters, whose torchvision labels start at 1.
+
+    Splits. The provided train/test split is used as-is, plus a held-out validation
+    split carved from the (seeded-shuffled) training set: val_fraction = 0.1. All four
+    methods -- including the native-weight-learning baselines -- train on the
+    post-split ~90% training subset, so the comparison stays apples-to-apples and no
+    method ever trains on data another method is evaluated against. The validation
+    split is used ONLY for (a) calibrating the scale factor that keeps the NN head's
+    fitted weights from saturating the TM's class-sum clamp, and (b) selecting the
+    NN head's best checkpoint during training -- never for the reported accuracy
+    metric or for choosing hyperparameters between methods. The test set is touched
+    only for the final reported per-epoch accuracy.
+
+    The four methods, per seed. total_epochs (default 500) is split at split_point
+    (default 0.3) into split_one = total_epochs*split_point native-TM epochs and
+    split_two = total_epochs - split_one epochs of whatever comes next:
+      - UTM: unweighted TM (weighted_clauses=False), native training for total_epochs.
+      - WTM: weighted TM (weighted_clauses=True), native training for total_epochs;
+        clause weights update via the TM's own TA-feedback rule (positive integers,
+        floor 1, +/-1 per relevant training example -- see
+        ConvolutionalTsetlinMachine.c).
+      - WTM-NN: identical to WTM for the first split_one epochs -- this is not a
+        separately-trained TM, it is the literal same trained object/checkpoint WTM
+        uses for its own first split_one epochs. That TM is then frozen and its clause
+        outputs feed a differentiable head (LogWeightHead) trained via AdamW for
+        split_two epochs, minimizing cross-entropy plus an L2 penalty pulling weights
+        toward their native-TM-inherited initial values.
+      - UTM-NN: identical construction, but the frozen base is the unweighted TM
+        (whose native per-clause weight is always exactly 1.0) and the differentiable
+        head starts from a uniform initialization (theta_init = 0, i.e. weight 1),
+        since there is no native weight signal to inherit.
+      Because WTM-NN/UTM-NN's TM phase reuses WTM's/UTM's own checkpoint rather than
+      retraining a separate TM, the two arms of each pair are guaranteed to start
+      from an identical trained state -- see the "Shared checkpoint" marker on the
+      per-epoch accuracy plots.
+
+    Hyperparameters. Clause count C, clause specificity T (T = C // 4 by convention
+    in this codebase), sensitivity s = 4.0, number_of_state_bits = 8. C is chosen per
+    dataset from prior informal exploration (see the "Findings" notes in __main__),
+    not a full grid search, and is held identical across all four methods within a
+    dataset -- this keeps the relative comparison unbiased by hyperparameter choice,
+    but means absolute accuracy numbers are not necessarily hyperparameter-optimal
+    and should not be quoted as SOTA comparisons without further tuning.
+
+    Seeds and reproducibility. n_seeds independent runs per dataset (5 in the
+    configured sweep), each seeded (BASE_SEED + i) across Python/NumPy/PyTorch RNGs
+    plus a fresh shuffle of the training-set order (see seed_everything). The C
+    extension's own RNGs (a PCG generator in fast_rand.h, libc rand() for the
+    negative-class draw) have no seed hook, and mc_tm_fit is OpenMP-parallel with
+    lock races on clause updates -- so bit-exact reproducibility of any single TM run
+    is NOT achieved; cross-seed variance instead comes from the controlled,
+    reproducible difference in training-set shuffle order, not from an uncontrolled
+    source. State this limitation explicitly rather than claiming full determinism.
+
+    Headline metric. "avg-last-10" test accuracy: the mean test-set accuracy over
+    the final 10 recorded epochs of a method's trajectory (see compute_summary_df),
+    not the single best epoch (which would be a cherry-picked, optimistic estimate)
+    and not a value chosen via the validation set (which would leak test-set
+    information indirectly). Reported per seed, then as mean +/- sample std (ddof=1,
+    NOT SEM or a CI) across seeds in the aggregate CSV/plots.
+
+    Significance testing. For each "-NN" method against its native-weight base
+    (WTM-NN vs. WTM; UTM-NN vs. UTM), a PAIRED comparison matched by seed index (seed
+    i's two runs share the same train/val split and the same checkpoint, so pairing
+    -- not comparing independent groups -- is the statistically correct test): a
+    paired t-test (primary) and Wilcoxon signed-rank (secondary, non-parametric) on
+    the n_seeds avg-last-10 accuracy values. IMPORTANT CAVEAT: at n_seeds = 5,
+    Wilcoxon's minimum achievable two-sided p-value is 0.0625 -- it cannot itself
+    report significance at this sample size regardless of effect size, so treat it as
+    supporting evidence (direction of every seed agreeing) rather than the primary
+    claim; the paired t-test and the raw mean_diff/std_diff are more informative at
+    this n. No multiple-comparison correction is currently applied across the
+    (up to) 8 tests run in a full 4-dataset sweep -- add one (e.g. Holm-Bonferroni)
+    before reporting all of them together as independent findings.
+
+    Weight-resolution ablation. For each "-NN" method, the fitted continuous clause
+    weights are evaluated two ways on the frozen base TM, with NO clamp-avoidance
+    rescaling (unlike the headline metric): as fitted ("continuous"), and rounded to
+    the nearest positive integer with a floor of 1 ("int-rounded") -- the domain
+    native TM weight updates are restricted to. Both are reported against the base
+    method's own native accuracy ("baseline"). This isolates whether a method's gain
+    over its base survives collapsing onto the coarser integer domain (an optimizer/
+    objective effect) or largely evaporates under rounding (a numeric-precision
+    effect) -- see weight_resolution_ablation's docstring for the full argument.
+
+    Compute-fairness framing. A native-TM training epoch and a differentiable-head
+    training epoch have very different wall-clock cost (OpenMP clause/TA updates vs.
+    a small linear head over precomputed clause outputs), so an epoch-indexed x-axis
+    is not a fixed unit of compute. Per-epoch accuracy curves are reported both by
+    epoch index and by cumulative wall-clock training time (see
+    _add_cumulative_time); the latter is the fair "who gets further for equal
+    compute" comparison. split_point itself is a single fixed choice (0.3, not
+    swept) -- the shared-checkpoint marker makes the comparison's structure explicit,
+    but the exact magnitude of any reported gain could depend on this choice.
+
+    Known limitations to disclose in the paper (not fixed by this pass; see prior
+    review discussion in this project for the full list): hyperparameters are fixed
+    per dataset rather than tuned per method; n_seeds = 5 is a small sample for the
+    paired tests above; TM training is not bit-reproducible (see Seeds above); no
+    per-class accuracy breakdown is computed; no interpretability/weight-sparsity
+    metric is computed, despite the TM's interpretability being the usual motivation
+    for preferring it over a black-box model -- if the paper's claim rests on the TM
+    remaining "the interpretable deliverable," that claim is currently asserted, not
+    measured.
 
 OUTPUT LAYOUT:
     results/<dataset>_C<C>_T<T>_s<s>_e<total_epochs>/
@@ -902,8 +985,9 @@ def _draw_bar_metric_ax(
     ax.set_title(title)
     ax.set_axisbelow(True)
     ax.grid(True, alpha=0.3, axis="y")
-    for bar, v in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), fmt.format(v), ha="center", va="bottom", fontsize=9)
+    for i, (bar, v) in enumerate(zip(bars, values)):
+        label_y = bar.get_height() + (yerr[i] if yerr is not None else 0.0)
+        ax.text(bar.get_x() + bar.get_width() / 2, label_y, fmt.format(v), ha="center", va="bottom", fontsize=9)
     if expand_acc_ylim:
         lo, hi = min(values), max(values)
         ax.set_ylim(lo - (hi - lo) * 0.5, hi + (hi - lo) * 0.2)
@@ -979,8 +1063,9 @@ def _draw_weight_resolution_ablation_ax(ax, method_data: list[dict], title: str)
             error_kw=({"ecolor": "#444444", "elinewidth": 1.0, "capthick": 1.0} if has_err else None),
             **style,
         )
-        for bar, v in zip(bars, vals):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{v:.1f}%", ha="center", va="bottom", fontsize=7)
+        for j, (bar, v) in enumerate(zip(bars, vals)):
+            label_y = bar.get_height() + (yerr[j] if yerr is not None else 0.0)
+            ax.text(bar.get_x() + bar.get_width() / 2, label_y, f"{v:.1f}%", ha="center", va="bottom", fontsize=7)
     ax.set_xticks(x)
     ax.set_xticklabels([d["method"] for d in method_data])
     ax.set_ylabel("Test Accuracy (%)")

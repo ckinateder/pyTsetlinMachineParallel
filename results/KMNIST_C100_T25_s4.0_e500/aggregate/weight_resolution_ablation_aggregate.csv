@@ -1,0 +1,3 @@
+dataset,total_epochs,T,s,method,n_seeds_total,n_available,baseline_test_accuracy_mean,baseline_test_accuracy_std,direct_continuous_test_accuracy_mean,direct_continuous_test_accuracy_std,direct_int_rounded_test_accuracy_mean,direct_int_rounded_test_accuracy_std,weight_resolution_gap_mean,weight_resolution_gap_std
+KMNIST,500,25,4.0,WTM-NN,5,5,73.3754,0.7988,80.814,0.3412,75.508,1.356,5.306,1.1631
+KMNIST,500,25,4.0,UTM-NN,5,5,68.0948,0.385,71.85,0.4903,68.028,0.5003,3.822,0.5791

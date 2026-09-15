@@ -1,0 +1,3 @@
+dataset,total_epochs,T,s,treatment_method,base_method,n_pairs,treatment_mean,base_mean,mean_diff,std_diff,ttest_statistic,ttest_pvalue,wilcoxon_statistic,wilcoxon_pvalue,wilcoxon_note
+KMNIST,500,25,4.0,WTM-NN,WTM,5,80.791,73.3754,7.4156,0.6433,25.77493584641672,1.3459077553274278e-05,0.0,0.0625,
+KMNIST,500,25,4.0,UTM-NN,UTM,5,71.8302,68.0948,3.7354,0.1469,56.863505660299495,5.726929544950238e-07,0.0,0.0625,

@@ -1,0 +1,12 @@
+{
+  "schema_version": 3,
+  "created_at": "2026-09-14T22:04:47.302887+00:00",
+  "C": 100,
+  "T": 25,
+  "s": 4.0,
+  "dataset_name": "FashionMNIST",
+  "number_of_state_bits": 8,
+  "split_point": 0.3,
+  "total_epochs": 500,
+  "val_fraction": 0.1
+}

@@ -1,0 +1,3 @@
+dataset,total_epochs,T,s,method,n_seeds_total,n_available,baseline_test_accuracy_mean,baseline_test_accuracy_std,direct_continuous_test_accuracy_mean,direct_continuous_test_accuracy_std,direct_int_rounded_test_accuracy_mean,direct_int_rounded_test_accuracy_std,weight_resolution_gap_mean,weight_resolution_gap_std
+FashionMNIST,500,25,4.0,WTM-NN,5,5,81.398,0.2439,84.398,0.4023,83.288,0.2285,1.11,0.3138
+FashionMNIST,500,25,4.0,UTM-NN,5,5,80.725,0.1676,82.452,0.1023,80.924,0.1021,1.528,0.1988

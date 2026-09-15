@@ -1,0 +1,3 @@
+dataset,total_epochs,T,s,treatment_method,base_method,n_pairs,treatment_mean,base_mean,mean_diff,std_diff,ttest_statistic,ttest_pvalue,wilcoxon_statistic,wilcoxon_pvalue,wilcoxon_note
+FashionMNIST,500,25,4.0,WTM-NN,WTM,5,84.4086,81.398,3.0106,0.243,27.699260587584657,1.0104488496819455e-05,0.0,0.0625,
+FashionMNIST,500,25,4.0,UTM-NN,UTM,5,82.4144,80.725,1.6894,0.1242,30.423297771756747,6.9535159978607844e-06,0.0,0.0625,

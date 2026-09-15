@@ -1,0 +1,5 @@
+dataset,total_epochs,T,s,split_point,val_fraction,method,n_seeds,avg_last10_tm_accuracy_mean,avg_last10_tm_accuracy_std,avg_tm_epoch_time_s_mean,avg_tm_epoch_time_s_std,avg_last10_tm_test_time_s_mean,avg_last10_tm_test_time_s_std,total_train_time_s_mean,total_train_time_s_std
+KMNIST,500,25,4.0,0.3,0.1,UTM,5,68.0948,0.385,0.5039,0.0008,0.0705,0.0019,251.94,0.39
+KMNIST,500,25,4.0,0.3,0.1,WTM,5,73.3754,0.7988,0.2874,0.0014,0.0633,0.0022,143.69,0.72
+KMNIST,500,25,4.0,0.3,0.1,WTM-NN,5,80.791,0.2602,0.2954,0.0015,0.0629,0.0023,113.35,0.19
+KMNIST,500,25,4.0,0.3,0.1,UTM-NN,5,71.8302,0.4406,0.5036,0.002,0.0687,0.0014,144.27,0.61

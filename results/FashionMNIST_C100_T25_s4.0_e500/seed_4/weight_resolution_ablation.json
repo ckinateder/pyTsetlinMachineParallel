@@ -1,0 +1,12 @@
+{
+  "native_WTM_weight_min": 1.0,
+  "native_WTM_weight_max": 26.0,
+  "WTM_baseline_test_accuracy": 81.061,
+  "WTM-NN_direct_continuous_test_accuracy": 83.84,
+  "WTM-NN_direct_int_rounded_test_accuracy": 83.03,
+  "WTM-NN_weight_resolution_gap": 0.8100000000000023,
+  "UTM_baseline_test_accuracy": 80.53,
+  "UTM-NN_direct_continuous_test_accuracy": 82.46,
+  "UTM-NN_direct_int_rounded_test_accuracy": 80.97,
+  "UTM-NN_weight_resolution_gap": 1.4899999999999949
+}

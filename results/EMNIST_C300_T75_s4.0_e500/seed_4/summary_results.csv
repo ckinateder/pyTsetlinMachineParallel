@@ -1,0 +1,5 @@
+method,avg_last10_tm_accuracy,avg_tm_epoch_time_s,avg_last10_tm_test_time_s,total_train_time_s
+UTM,73.16,2.37,0.7602,1184.89
+WTM,80.19,0.841,0.7437,420.74
+WTM-NN,85.22,0.913,0.7376,326.62
+UTM-NN,78.71,2.357,0.7843,541.52

@@ -1,0 +1,12 @@
+{
+  "schema_version": 3,
+  "created_at": "2026-09-15T04:13:53.058513+00:00",
+  "C": 300,
+  "T": 75,
+  "s": 4.0,
+  "dataset_name": "EMNIST",
+  "number_of_state_bits": 8,
+  "split_point": 0.3,
+  "total_epochs": 500,
+  "val_fraction": 0.1
+}

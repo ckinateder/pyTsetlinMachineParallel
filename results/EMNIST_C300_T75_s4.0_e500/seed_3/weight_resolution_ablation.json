@@ -1,0 +1,12 @@
+{
+  "native_WTM_weight_min": 1.0,
+  "native_WTM_weight_max": 74.0,
+  "WTM_baseline_test_accuracy": 80.50576923076923,
+  "WTM-NN_direct_continuous_test_accuracy": 85.59134615384615,
+  "WTM-NN_direct_int_rounded_test_accuracy": 84.70192307692308,
+  "WTM-NN_weight_resolution_gap": 0.889423076923066,
+  "UTM_baseline_test_accuracy": 73.15192307692307,
+  "UTM-NN_direct_continuous_test_accuracy": 78.54807692307692,
+  "UTM-NN_direct_int_rounded_test_accuracy": 73.35576923076923,
+  "UTM-NN_weight_resolution_gap": 5.192307692307693
+}
